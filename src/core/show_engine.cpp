@@ -1793,10 +1793,11 @@ void ShowEngine::process_commands()
                     FullCueEntry fce = c.entry;
                     fce.number.major = static_cast<int>(pb->cuelist.size()) + 1;
                     fce.number.minor = 0;
-                    // Save per-stream keyframe layers for multi-head recordings
+                    // Merge latched per-stream KF from deselected streams into the cue.
+                    // UI-programmed content (already in fce.per_stream_kf) takes priority.
                     for (const auto& [sid, sp] : stream_prog_) {
                         if (!sp.objects.objects.empty())
-                            fce.per_stream_kf[sid] = sp.objects;
+                            fce.per_stream_kf.try_emplace(sid, sp.objects);
                     }
                     pb->cuelist.push_back(fce);
                     // Pre-select first cue so it shows in the UI without requiring a GO
@@ -2876,27 +2877,23 @@ void ShowEngine::build_frame()
             };
 
             const auto& assigned = pb->config.output_stream_ids;
-            // Build the effective stream list for the per-stream path:
-            //   1. Playback-level assignment (assigned) takes priority.
-            //   2. Fall back to the cue-level recorded stream IDs (fce.output_stream_ids).
-            //   3. Last resort: derive from the union of per_stream_kf / per_stream_fx keys.
+            // Effective stream list: explicit assignment wins; otherwise all configured streams.
             std::vector<int> effective_ids;
             if (!assigned.empty()) {
                 effective_ids = assigned;
-            } else if (!fce.output_stream_ids.empty()) {
-                effective_ids = fce.output_stream_ids;
             } else {
-                for (const auto& kv : fce.per_stream_kf) effective_ids.push_back(kv.first);
-                for (const auto& kv : fce.per_stream_fx) {
-                    if (std::find(effective_ids.begin(), effective_ids.end(), kv.first) == effective_ids.end())
-                        effective_ids.push_back(kv.first);
-                }
+                for (const auto& s : output_streams_)
+                    effective_ids.push_back(s.config.id);
             }
             if ((!fce.per_stream_fx.empty() || !fce.per_stream_kf.empty()) && !effective_ids.empty()) {
-                // Per-stream path during fade: each stream may have different geometry and/or FX
+                // Per-stream path during fade: each stream may have different geometry and/or FX.
+                // Only render streams that were explicitly programmed (have per-stream KF or FX).
+                // Streams with neither entry are skipped — they were not part of this cue.
                 for (int sid : effective_ids) {
-                    // Resolve per-stream current and previous keyframe layers
                     auto cur_kf_it = fce.per_stream_kf.find(sid);
+                    auto fx_it     = fce.per_stream_fx.find(sid);
+                    if (cur_kf_it == fce.per_stream_kf.end() && fx_it == fce.per_stream_fx.end())
+                        continue;
                     const KeyframeLayer& stream_cur_kf = (cur_kf_it != fce.per_stream_kf.end())
                                                          ? cur_kf_it->second : cur_kf;
                     const KeyframeLayer* stream_prev_kf = prev_kf;
@@ -2908,7 +2905,6 @@ void ShowEngine::build_frame()
                     KeyframeLayer stream_morphed = build_morphed(stream_cur_kf, stream_prev_kf);
                     if (stream_morphed.objects.empty()) continue;
                     PointBuffer stream_pts = render_keyframe_layer(stream_morphed, 256);
-                    auto fx_it = fce.per_stream_fx.find(sid);
                     const FxLayer& stream_fx = (fx_it != fce.per_stream_fx.end())
                                                ? fx_it->second : fce.fx_layer;
                     apply_frame_fx(stream_pts, stream_fx, fx_t);
@@ -3003,31 +2999,26 @@ void ShowEngine::build_frame()
             const FullCueEntry& fce = pb->cuelist[static_cast<size_t>(rs.current_idx)];
             if (fce.keyframe_layer.objects.empty() && fce.per_stream_kf.empty()) continue;
             const auto& assigned = pb->config.output_stream_ids;
-            // Build the effective stream list for the per-stream path:
-            //   1. Playback-level assignment (assigned) takes priority.
-            //   2. Fall back to the cue-level recorded stream IDs (fce.output_stream_ids).
-            //   3. Last resort: derive from the union of per_stream_kf / per_stream_fx keys.
+            // Effective stream list: explicit assignment wins; otherwise all configured streams.
             std::vector<int> effective_ids;
             if (!assigned.empty()) {
                 effective_ids = assigned;
-            } else if (!fce.output_stream_ids.empty()) {
-                effective_ids = fce.output_stream_ids;
             } else {
-                for (const auto& kv : fce.per_stream_kf) effective_ids.push_back(kv.first);
-                for (const auto& kv : fce.per_stream_fx) {
-                    if (std::find(effective_ids.begin(), effective_ids.end(), kv.first) == effective_ids.end())
-                        effective_ids.push_back(kv.first);
-                }
+                for (const auto& s : output_streams_)
+                    effective_ids.push_back(s.config.id);
             }
             if ((!fce.per_stream_fx.empty() || !fce.per_stream_kf.empty()) && !effective_ids.empty()) {
-                // Per-stream path: each assigned stream may have different geometry and/or FX
+                // Per-stream path: only render streams that were explicitly programmed.
+                // Streams absent from both per_stream_kf and per_stream_fx are skipped.
                 for (int sid : effective_ids) {
                     auto kf_it = fce.per_stream_kf.find(sid);
+                    auto fx_it = fce.per_stream_fx.find(sid);
+                    if (kf_it == fce.per_stream_kf.end() && fx_it == fce.per_stream_fx.end())
+                        continue;
                     const KeyframeLayer& stream_kf = (kf_it != fce.per_stream_kf.end())
                                                      ? kf_it->second : fce.keyframe_layer;
                     if (stream_kf.objects.empty()) continue;
                     PointBuffer stream_pts = render_keyframe_layer(stream_kf, 256);
-                    auto fx_it = fce.per_stream_fx.find(sid);
                     const FxLayer& stream_fx = (fx_it != fce.per_stream_fx.end())
                                                ? fx_it->second : fce.fx_layer;
                     apply_frame_fx(stream_pts, stream_fx, fx_t);

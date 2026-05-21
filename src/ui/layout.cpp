@@ -7834,15 +7834,6 @@ static void draw_show_view_grid(UIState& state, LayoutContext& ctx, LayoutCallba
                         }
                     } catch (...) {}
                 }
-                // Always set output_stream_ids to the currently active streams so the
-                // engine routes the cue exclusively to those heads (not broadcast to all).
-                // Active streams are always the authoritative source regardless of per-stream FX.
-                if (cbs.on_playback_config) {
-                    UIState::PlaybackConf& conf = state.pb_conf[i];
-                    conf.output_stream_ids = state.active_stream_ids;
-                    if (!conf.output_stream_ids.empty())
-                        cbs.on_playback_config(pb.id, conf);
-                }
                 cbs.on_record_frame_to_playback(pb.id, fce);
                 ctx.rec_armed = false;
             } else if (!unused && cbs.on_playback_go) {
@@ -8142,15 +8133,6 @@ void panel_playback_bar(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
                             fce.per_stream_kf[sid] = kf;
                         }
                     } catch (...) {}
-                }
-                // Always set output_stream_ids to the currently active streams so the
-                // engine routes the cue exclusively to those heads (not broadcast to all).
-                // Active streams are always the authoritative source regardless of per-stream FX.
-                if (cbs.on_playback_config) {
-                    UIState::PlaybackConf& conf = state.pb_conf[i];
-                    conf.output_stream_ids = state.active_stream_ids;
-                    if (!conf.output_stream_ids.empty())
-                        cbs.on_playback_config(pb.id, conf);
                 }
                 cbs.on_record_frame_to_playback(pb.id, fce);
                 ctx.rec_armed = false;
