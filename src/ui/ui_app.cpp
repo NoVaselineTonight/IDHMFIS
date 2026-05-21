@@ -990,9 +990,9 @@ void Application::Impl::do_load_project(const std::string& path) {
             // any output whose bus ordinal changed (e.g. different number of
             // outputs in the new project) gets a fresh manager with the correct
             // bus pointer.  on_output_patch_changed({}) stops and removes them all.
-            // Only do this if the project actually has a patch; old showfiles have
-            // no output_patch field and would end up with zero managers after teardown.
-            if (!project->output_patch.empty() && layout_cbs.on_output_patch_changed)
+            // Always tear down before rebuilding so stale DacManagers from the
+            // previous project are stopped before new ones are created.
+            if (layout_cbs.on_output_patch_changed)
                 layout_cbs.on_output_patch_changed({});
 
             while (dacs_stopping_.load(std::memory_order_acquire) > 0)
@@ -1234,9 +1234,13 @@ void Application::Impl::do_new_project() {
     engine->send(cmd::LoadProject{ project });
     engine->send(cmd::ClearProgrammer{});
 
-    // Notify engine of empty patch and empty active-stream set
+    // Notify engine of empty patch and empty active-stream set.
+    // Wait for all in-flight DacManager stops to complete before returning
+    // so the new show starts with a clean slate (mirrors do_load_project).
     if (layout_cbs.on_output_patch_changed)
         layout_cbs.on_output_patch_changed({});
+    while (dacs_stopping_.load(std::memory_order_acquire) > 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     if (layout_cbs.on_active_streams_changed)
         layout_cbs.on_active_streams_changed(state.active_stream_ids, {});
     state.active_stream_ids.clear();

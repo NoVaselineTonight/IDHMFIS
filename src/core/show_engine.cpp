@@ -3222,6 +3222,12 @@ void ShowEngine::build_frame()
         // active_stream_ids_ controls which streams receive programmer content.
         // Empty = programmer off (no streams receive programmer); non-empty = only those IDs.
         bool submitted_to_legacy_bus = false;
+        // True when at least one laser stream is assigned to the legacy bus (laser_idx==0).
+        // Only submit a keepalive blank to bus_ when this is set; otherwise there is no
+        // DacManager draining bus_ and the blank is wasted / could cause a ghost output.
+        bool has_legacy_bus_laser = false;
+        for (const auto& d : stream_defs_)
+            if (d.type == OutputStreamType::Laser) { has_legacy_bus_laser = true; break; }
 
         for (size_t si = 0; si < stream_defs_.size(); ++si) {
             const OutputStreamDef& def = stream_defs_[si];
@@ -3398,9 +3404,9 @@ void ShowEngine::build_frame()
             // Hdmi streams: points are available via preview_pts_ for the SDL window
         }
 
-        // If no laser stream mapped to the legacy bus, submit a blank frame
-        // so the legacy DacManager doesn't stall waiting for a frame.
-        if (!submitted_to_legacy_bus) {
+        // If a laser stream is wired to the legacy bus but didn't submit this tick
+        // (e.g. it is disabled), send a blank keepalive so the DacManager doesn't stall.
+        if (!submitted_to_legacy_bus && has_legacy_bus_laser) {
             RenderFrame blank;
             blank.points.push_back(LaserPoint{});
             blank.points.back().blanked = true;

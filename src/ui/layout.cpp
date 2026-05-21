@@ -7812,6 +7812,18 @@ static void draw_show_view_grid(UIState& state, LayoutContext& ctx, LayoutCallba
                 fce.fx_layer     = ctx.programmer_fx_layer;
                 fce.trigger.type = TriggerType::Follow;
                 fce.timing.hold  = 2.f;
+                // Snapshot currently-selected streams into programmer_feeds before reading.
+                // feeds_switch_s only saves state on deselect, so the stream currently in
+                // the programmer hasn't been written yet. We capture it here so a single
+                // REC press records every programmed head simultaneously.
+                for (int sid : state.active_stream_ids) {
+                    if (!ctx.frame_editor.objects.empty() || !ctx.programmer_fx_layer.fx.empty()) {
+                        auto& feed = ctx.programmer_feeds[std::to_string(sid)];
+                        feed.objects = ctx.frame_editor.objects;
+                        feed.fx      = ctx.programmer_fx_layer;
+                        feed.global  = ctx.programmer_global;
+                    }
+                }
                 // Populate per-stream FX from saved programmer feeds.
                 // Only require that the feed has FX — objects may be empty if a stream
                 // was selected purely for FX programming.
@@ -8112,6 +8124,18 @@ void panel_playback_bar(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
                 fce.fx_layer     = ctx.programmer_fx_layer;
                 fce.trigger.type = TriggerType::Follow;
                 fce.timing.hold  = 2.f;
+                // Snapshot currently-selected streams into programmer_feeds before reading.
+                // feeds_switch_s only saves state on deselect, so the stream currently in
+                // the programmer hasn't been written yet. We capture it here so a single
+                // REC press records every programmed head simultaneously.
+                for (int sid : state.active_stream_ids) {
+                    if (!ctx.frame_editor.objects.empty() || !ctx.programmer_fx_layer.fx.empty()) {
+                        auto& feed = ctx.programmer_feeds[std::to_string(sid)];
+                        feed.objects = ctx.frame_editor.objects;
+                        feed.fx      = ctx.programmer_fx_layer;
+                        feed.global  = ctx.programmer_global;
+                    }
+                }
                 // Populate per-stream FX from saved programmer feeds.
                 // Only require that the feed has FX — objects may be empty if a stream
                 // was selected purely for FX programming.
