@@ -1,6 +1,6 @@
 # IDHMFIS User Guide
 
-**Version 2.6.1** — Professional laser show programming with NDI-first output.
+**Version 3.52** — Professional laser show programming software. Primary output: ILDA over hardware DAC.
 
 ---
 
@@ -29,8 +29,8 @@
 On first launch, IDHMFIS:
 1. Presents the **Safety Acknowledgment** dialog. You must accept before any laser output is enabled. This dialog is shown once per machine; acceptance is persisted to `%APPDATA%\IDHMFIS\eula_accepted`.
 2. Creates a default project with a "Beams" cue already loaded.
-3. Starts an NDI source named "IDHMFIS" on your local network.
-4. Opens an Art-Net listener on all interfaces, Universe 0.
+3. Opens an Art-Net listener on all interfaces, Universe 0.
+4. Starts an NDI source named "IDHMFIS" on your local network (if NDI SDK was present at build time).
 
 **The UI layout:**
 
@@ -65,11 +65,14 @@ All panels are dockable. Use **Windows → Reset Layout** to return to the defau
 Click the Play button (▶) in the Transport Bar, or press `Space`.
 
 You should immediately see:
-- A beam pattern in the Laser Preview (green pulsing NDI dot = streaming)
-- "IDHMFIS" appearing in NDI Studio Monitor on any machine on your LAN
+- A beam pattern in the Laser Preview
 - The beam simulation in the preview (beams with Gaussian glow in haze)
 
-**Step 2: Connect ArtNet**
+**Step 2: Connect a DAC**
+
+Plug in a Helios DAC or connect to an EtherDream on the network. IDHMFIS detects it automatically and shows it in the DAC status indicator. The physical laser output follows the active cue. Hardware output is disabled by default on launch — enable it with the output indicator button in the Transport Bar.
+
+**Step 3: Connect ArtNet** (optional)
 
 From any lighting console or the test sender tool:
 ```
@@ -78,15 +81,15 @@ artnet_test_sender.exe --ip <your machine's IP>
 
 The ArtNet status indicator in the Transport Bar turns green when packets arrive. The cue selection and parameters respond within 8 ms.
 
-**Step 3: Connect a DAC** (optional)
+**Step 4: NDI** (optional, requires NDI SDK at build time)
 
-Plug in a Helios DAC or connect to an EtherDream on the network. IDHMFIS detects it automatically and shows it in the DAC status indicator. The physical laser output follows the same content as the NDI preview.
+If NDI was built in, open NDI Studio Monitor — source "IDHMFIS" appears on your LAN. The NDI stream carries the same GPU-rendered beam simulation visible in the Laser Preview.
 
 ---
 
 ## The Laser Preview
 
-The center panel shows the NDI stream — exactly what is sent over the network. Controls above the preview:
+The center panel shows the GPU-rendered beam simulation — the same content that is sent over NDI (when NDI is enabled) and used as the basis for the DAC point buffer. Controls above the preview:
 
 | Control | Function |
 |---------|----------|
@@ -101,7 +104,7 @@ The center panel shows the NDI stream — exactly what is sent over the network.
 | 100% | Native resolution |
 | F11 | Fullscreen preview |
 
-The preview is **not** a camera view — it is the actual GPU render output. What you see is what the NDI receiver gets.
+The preview is not a camera view — it is the actual GPU render output. When NDI is enabled, what you see is what the NDI receiver gets.
 
 ---
 
@@ -794,5 +797,5 @@ See the Point Optimizer section above for all parameters.
 
 ---
 
-*IDHMFIS User Guide — Version 2.6.1*
-*NDI® is a trademark of Vizrt Group. The NDI SDK is a separate download.*
+*IDHMFIS User Guide — Version 3.52*
+*NDI® is a trademark of Vizrt Group. The NDI SDK is an optional separate download.*

@@ -169,10 +169,13 @@ NLOHMANN_JSON_SERIALIZE_ENUM(FrameFxType, {
     { FrameFxType::ColorPulse,   "ColorPulse"   },
     { FrameFxType::RainbowTrail, "RainbowTrail" },
     { FrameFxType::Spiral,       "Spiral"       },
-    { FrameFxType::Col2,         "Col2"         },
-    { FrameFxType::Col3,         "Col3"         },
-    { FrameFxType::ColFlick,     "ColFlick"     },
-    { FrameFxType::Strobe,       "Strobe"       },
+    { FrameFxType::Col2,              "Col2"              },
+    { FrameFxType::Col3,              "Col3"              },
+    { FrameFxType::ColFlick,          "ColFlick"          },
+    { FrameFxType::Strobe,            "Strobe"            },
+    { FrameFxType::Col4,              "Col4"              },
+    { FrameFxType::Col5,              "Col5"              },
+    { FrameFxType::RotateContinuous,  "RotateContinuous"  },
 })
 
 void to_json(nlohmann::json& j, const GlobalFxEntry& v);

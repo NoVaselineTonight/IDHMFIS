@@ -27,7 +27,7 @@ automatically via CMake FetchContent — no vcpkg or manual installs required.
 | CMake | 3.25+ | Build system |
 | Ninja | 1.11+ | Fast build backend |
 | Git | any | Required by CMake FetchContent |
-| NDI SDK | 6.x (or 5.x) | NDI streaming (optional — app runs without it) |
+| NDI SDK | 6.x (or 5.x) | NDI preview/broadcast streaming (optional — app runs without it) |
 | WiX Toolset | 4.x | MSI installer (optional) |
 
 All other dependencies (SDL3, ImGui, nlohmann/json, RtMidi, KissFFT, VMA, etc.)
@@ -166,13 +166,14 @@ NDI SDK is an external install (not downloaded by CMake).
 
 ## NDI Not Installed?
 
-If the NDI SDK is not found at configure time, CMake emits:
+NDI is optional. If the NDI SDK is not found at configure time, CMake emits:
 ```
 -- NDI SDK not found — building without NDI output. Install from https://ndi.video/
 ```
 
-The app builds and runs without NDI. The NDI status indicator in the UI shows
-"NDI Unavailable". Install the NDI SDK and rebuild to enable NDI streaming.
+The app builds and runs without NDI. DAC output, ArtNet, MIDI, OSC, and all other
+functionality work normally. The NDI status indicator in the UI shows "NDI Unavailable".
+Install the NDI SDK and rebuild with `-DIDHMFIS_WITH_NDI=ON` to enable NDI streaming.
 
 ---
 
@@ -188,16 +189,6 @@ No other steps. If step 3 or 4 fail on a clean clone, that is a bug.
 
 ---
 
-## Verifying NDI Output
-
-1. Install NDI Tools (free) from https://ndi.video/tools/
-2. Launch NDI Studio Monitor
-3. Start IDHMFIS and press Play
-4. "IDHMFIS" should appear in NDI Studio Monitor's source list within 2 seconds
-5. The feed should show beam/haze simulation at the configured fps
-
----
-
 ## Verifying ArtNet Input
 
 ```powershell
@@ -207,3 +198,28 @@ No other steps. If step 3 or 4 fail on a clean clone, that is a bug.
 
 The test sender sends animated DMX values. IDHMFIS's DMX activity monitor should
 show channel activity, and the laser preview should respond within 8 ms.
+
+---
+
+## Verifying DAC Output
+
+1. Connect a supported DAC (Helios USB, EtherDream on LAN, or LaserDock USB)
+2. Start IDHMFIS and press Play
+3. The DAC status indicator in the Transport Bar should turn green within 2 seconds
+4. The physical laser output follows the active cue
+
+For testing without hardware, enable the emulated Helios DAC in Settings → DAC →
+Emulated DAC. This exercises the full output pipeline without a physical device.
+
+---
+
+## Verifying NDI Output (optional)
+
+NDI output is disabled by default if the NDI SDK was not present at build time.
+
+1. Install NDI Tools (free) from https://ndi.video/tools/
+2. Build with NDI SDK installed (see prerequisites above)
+3. Launch NDI Studio Monitor
+4. Start IDHMFIS and press Play
+5. "IDHMFIS" should appear in NDI Studio Monitor's source list within 2 seconds
+6. The feed should show beam/haze simulation at the configured fps

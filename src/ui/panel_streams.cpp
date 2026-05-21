@@ -76,7 +76,8 @@ static void feeds_switch_s(const std::vector<int>& old_ids,
         if (!was_already_selected) {
             const std::string key = std::to_string(target_id);
             auto it = ctx.programmer_feeds.find(key);
-            if (it != ctx.programmer_feeds.end() && !it->second.objects.empty()) {
+            if (it != ctx.programmer_feeds.end() &&
+                (!it->second.objects.empty() || !it->second.fx.fx.empty() || !it->second.global.fx.empty())) {
                 ctx.frame_editor.objects = it->second.objects;
                 ctx.programmer_global   = it->second.global;
                 ctx.programmer_fx_layer = it->second.fx;
@@ -566,6 +567,9 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                 } else if (grp) {
                     std::vector<int> old_ids_grp = state.active_stream_ids;
                     if (grp_selected) {
+                        // Capture combo key before switching away so that
+                        // re-selecting this group later restores its programmer content.
+                        feeds_capture_s(old_ids_grp, ctx);
                         feeds_switch_s(old_ids_grp, {}, ctx);
                         state.active_group_id = -1;
                         state.active_stream_ids.clear();
@@ -573,6 +577,21 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                             cbs.on_mirrored_streams_changed({});
                     } else {
                         feeds_switch_s(old_ids_grp, grp->member_ids, ctx);
+                        // Restore group programmer state from combo key if available.
+                        // feeds_switch_s only restores single-stream state (new_ids.size()==1),
+                        // so multi-member groups need this explicit combo-key lookup.
+                        {
+                            const std::string combo_key = feeds_key_s(grp->member_ids);
+                            auto it = ctx.programmer_feeds.find(combo_key);
+                            if (it != ctx.programmer_feeds.end()) {
+                                const auto& saved = it->second;
+                                if (!saved.objects.empty() || !saved.fx.fx.empty() || !saved.global.fx.empty()) {
+                                    ctx.frame_editor.objects = saved.objects;
+                                    ctx.programmer_global    = saved.global;
+                                    ctx.programmer_fx_layer  = saved.fx;
+                                }
+                            }
+                        }
                         state.active_group_id   = slot;
                         state.active_stream_ids = grp->member_ids;
                         if (cbs.on_mirrored_streams_changed)

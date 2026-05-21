@@ -259,6 +259,9 @@ enum class FrameFxType {
     Col3,        // 3-color: snap cycle through 3 hues 120° apart at current saturation/value
     ColFlick,    // color flicker: random per-channel intensity variation (fire/glitch)
     Strobe,      // rhythmic blanking: points blanked when phase > depth (depth = duty 0..1)
+    Col4,           // 4-color cycle
+    Col5,           // 5-color cycle
+    RotateContinuous, // continuous unidirectional rotation
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -281,6 +284,9 @@ struct FrameFxEntry {
     // Custom colors for color FX (Col2, Col3, ColFlick, ColorCycle, ColorPulse, RainbowTrail)
     float col_a_r = 1.f, col_a_g = 0.f, col_a_b = 0.f;  // Color A (default red)
     float col_b_r = 0.f, col_b_g = 0.f, col_b_b = 1.f;  // Color B (default blue)
+    float col_c_r = 0.f, col_c_g = 1.f, col_c_b = 0.f;  // Color C (default green)
+    float col_d_r = 1.f, col_d_g = 1.f, col_d_b = 0.f;  // Color D (default yellow)
+    float col_e_r = 1.f, col_e_g = 0.f, col_e_b = 1.f;  // Color E (default magenta)
     bool  use_custom_colors = false;
 };
 
@@ -397,6 +403,11 @@ struct FullCueEntry {
     // Streams absent from this map fall back to fx_layer (the global default).
     std::unordered_map<int, FxLayer> per_stream_fx;
 
+    // Per-stream keyframe layers: stream_id -> KeyframeLayer override.
+    // If a stream_id is present here, its KeyframeLayer overrides keyframe_layer for that stream.
+    // Streams absent from this map fall back to keyframe_layer (the global default).
+    std::unordered_map<int, KeyframeLayer> per_stream_kf;
+
     // Sparse map: param_name -> override value for this cue.
     // Empty means pure tracking cue (no parameter changes).
     std::vector<std::pair<std::string, float>> param_overrides;
@@ -416,6 +427,11 @@ struct FullCueEntry {
     // ── 3-layer system ───────────────────────────────────────────────────────
     GlobalLayer    global_layer;
     KeyframeLayer  keyframe_layer;
+
+    // Stream IDs that were active when this cue was recorded.
+    // Used by build_frame() to route per-stream content when the playback-level
+    // output_stream_ids is empty (the common case for default playbacks).
+    std::vector<int> output_stream_ids;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

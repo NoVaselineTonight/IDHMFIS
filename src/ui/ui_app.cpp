@@ -995,6 +995,9 @@ void Application::Impl::do_load_project(const std::string& path) {
             if (!project->output_patch.empty() && layout_cbs.on_output_patch_changed)
                 layout_cbs.on_output_patch_changed({});
 
+            while (dacs_stopping_.load(std::memory_order_acquire) > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
             state.patched_outputs.clear();
             for (const auto& cfg : project->output_patch) {
                 UIState::PatchedOutput po;
@@ -1168,6 +1171,11 @@ void Application::Impl::do_load_project(const std::string& path) {
             engine->send(cmd::CreateTimeline{ std::move(def) });
         }
         engine->send(cmd::SetTimecodeSettings{ project->tc_config });
+        // on_output_patch_changed (called above during patch restoration) sets
+        // project_dirty = true so the autosave fires for patch-only edits.
+        // Clear the flag here — after ALL restoration is complete — so that a
+        // freshly loaded project does not appear modified.
+        state.project_dirty = false;
         log::info("do_load_project: loaded '%s'", path.c_str());
     } catch (...) {
         log::warn("do_load_project: failed to load '%s'", path.c_str());
@@ -1736,7 +1744,20 @@ void Application::Impl::wire_callbacks() {
 #endif
         }
     };
-    layout_cbs.on_undo          = [this]() { state.project_dirty = true; };
+    layout_cbs.on_undo          = [this]() {
+        state.project_dirty = true;
+        if (!layout_ctx.programmer_undo_stack.empty() && !layout_ctx.fe_window_focused) {
+            ProgrammerUndoEntry entry = std::move(layout_ctx.programmer_undo_stack.back());
+            layout_ctx.programmer_undo_stack.pop_back();
+            layout_ctx.frame_editor        = std::move(entry.frame_editor);
+            layout_ctx.programmer_global   = std::move(entry.programmer_global);
+            layout_ctx.programmer_fx_layer = std::move(entry.programmer_fx_layer);
+            layout_ctx.programmer_feeds    = std::move(entry.programmer_feeds);
+            state.active_stream_ids        = entry.active_stream_ids;
+            state.active_group_id          = entry.active_group_id;
+            engine->send(cmd::SetActiveStreams{ state.active_stream_ids });
+        }
+    };
     layout_cbs.on_redo          = [this]() { state.project_dirty = true; };
 
     // Transport — send engine commands
@@ -2160,9 +2181,53 @@ void Application::Impl::wire_callbacks() {
         state.project_dirty = true;
     };
 
-    // Include cue into programmer — engine just needs to know (optional bookkeeping)
-    layout_cbs.on_include_cue = [this](int /*cue_idx*/) {
-        // No engine command needed — UI handles the programmer load directly
+    // Include cue into programmer — sync engine latches for deselected streams
+    layout_cbs.on_include_cue = [this](int cue_idx) {
+        // Sync engine latches: for each deselected stream that has per-stream FX in
+        // the included cue, update stream_prog_ so hardware output reflects the include.
+        if (cue_idx < 0 || cue_idx >= (int)state.full_cue_list.size()) return;
+        const FullCueEntry& fce = state.full_cue_list[cue_idx];
+        KeyframeLayer kf;
+        kf.objects       = layout_ctx.frame_editor.objects;
+        kf.symmetry_mode = static_cast<int>(layout_ctx.frame_editor.symmetry);
+        for (const auto& [sid, sfx] : fce.per_stream_fx) {
+            bool active = std::find(state.active_stream_ids.begin(),
+                                    state.active_stream_ids.end(), sid)
+                          != state.active_stream_ids.end();
+            if (!active) {
+                engine->send(cmd::LatchProgrammer{
+                    { sid },
+                    kf,
+                    layout_ctx.programmer_global,
+                    sfx
+                });
+            }
+        }
+    };
+
+    // Include playback cue into programmer — sync engine latches for deselected streams
+    layout_cbs.on_include_playback_cue = [this](int pb_id, int cue_idx) {
+        // Find the playback's cuelist and update engine latches for included per-stream FX
+        if (state.pb_cuelist_pb_id == pb_id &&
+            cue_idx >= 0 && cue_idx < (int)state.pb_cuelist.size()) {
+            const FullCueEntry& fce = state.pb_cuelist[cue_idx];
+            KeyframeLayer kf;
+            kf.objects       = layout_ctx.frame_editor.objects;
+            kf.symmetry_mode = static_cast<int>(layout_ctx.frame_editor.symmetry);
+            for (const auto& [sid, sfx] : fce.per_stream_fx) {
+                bool active = std::find(state.active_stream_ids.begin(),
+                                        state.active_stream_ids.end(), sid)
+                              != state.active_stream_ids.end();
+                if (!active) {
+                    engine->send(cmd::LatchProgrammer{
+                        { sid },
+                        kf,
+                        layout_ctx.programmer_global,
+                        sfx
+                    });
+                }
+            }
+        }
     };
 
     // Update: replace the included library cue with the current programmer content
@@ -2328,7 +2393,7 @@ void Application::Impl::wire_callbacks() {
                     std::thread([raw, this]() {
                         raw->stop();
                         delete raw;
-                        dacs_stopping_.fetch_sub(1, std::memory_order_relaxed);
+                        dacs_stopping_.fetch_sub(1, std::memory_order_release);
                     }).detach();
                     to_erase.push_back(id);
                 }
@@ -2389,6 +2454,11 @@ void Application::Impl::wire_callbacks() {
             if (it != laser_managers_.end())
                 po.citp_stream_name = it->second->citp_stream_name();
         }
+
+        // Output patch changes are user edits — mark the project modified so
+        // autosave fires even when no cuelist content has changed.
+        // do_load_project resets this flag after all restoration is complete.
+        state.project_dirty = true;
     };
 
     // Active stream selection: which outputs the programmer sends its frame to.
@@ -2406,16 +2476,30 @@ void Application::Impl::wire_callbacks() {
         bool any_deselected = false;
         for (int old_id : old_ids) {
             if (std::find(ids.begin(), ids.end(), old_id) == ids.end()) {
-                // This stream was deselected — latch its current programmer state
                 KeyframeLayer kf;
                 kf.objects       = layout_ctx.frame_editor.objects;
                 kf.symmetry_mode = static_cast<int>(layout_ctx.frame_editor.symmetry);
-                engine->send(cmd::LatchProgrammer{
-                    { old_id },
-                    kf,
-                    layout_ctx.programmer_global,
-                    layout_ctx.programmer_fx_layer
-                });
+                // Check if there is actually programmer content to latch
+                bool has_objects = !kf.objects.empty();
+                bool has_global_fx = !layout_ctx.programmer_global.fx.empty();
+                // Use per-stream FX if available, otherwise fall back to global programmer FX
+                const std::string stream_key = std::to_string(old_id);
+                FxLayer latch_fx = layout_ctx.programmer_fx_layer;
+                auto feed_it = layout_ctx.programmer_feeds.find(stream_key);
+                bool has_stream_fx = (feed_it != layout_ctx.programmer_feeds.end() &&
+                                      !feed_it->second.fx.fx.empty());
+                if (has_stream_fx)
+                    latch_fx = feed_it->second.fx;
+                bool has_fx = !latch_fx.fx.empty();
+                // Only latch if there is content to preserve
+                if (has_objects || has_global_fx || has_fx) {
+                    engine->send(cmd::LatchProgrammer{
+                        { old_id },
+                        kf,
+                        layout_ctx.programmer_global,
+                        latch_fx
+                    });
+                }
                 any_deselected = true;
             }
         }

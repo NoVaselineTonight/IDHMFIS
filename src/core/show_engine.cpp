@@ -429,10 +429,35 @@ PointBuffer ShowEngine::render_keyframe_layer(const KeyframeLayer& kf, int targe
                 out.push_back(LaserPoint::from_norm(px, py, r8, g8, b8, k == 0));
             }
         } else {
-            // Line / Text / other: polyline through control points
-            for (size_t i = 0; i < obj.pts.size(); ++i) {
-                out.push_back(LaserPoint::from_norm(obj.pts[i].x, obj.pts[i].y,
+            // Line / Text / other: subdivide each segment proportionally to its length
+            if (obj.pts.size() == 1) {
+                out.push_back(LaserPoint::from_norm(obj.pts[0].x, obj.pts[0].y,
                     r8, g8, b8, false));
+            } else if (obj.pts.size() >= 2) {
+                int total_steps = std::max(2, target_pts / std::max(1, (int)kf.objects.size()));
+
+                // Compute total polyline length
+                float total_len = 0.f;
+                for (size_t i = 0; i + 1 < obj.pts.size(); ++i) {
+                    float ddx = obj.pts[i + 1].x - obj.pts[i].x;
+                    float ddy = obj.pts[i + 1].y - obj.pts[i].y;
+                    total_len += std::sqrt(ddx * ddx + ddy * ddy);
+                }
+                if (total_len < 1e-9f) total_len = 1e-9f;
+
+                // Subdivide each segment proportionally
+                for (size_t i = 0; i + 1 < obj.pts.size(); ++i) {
+                    float ddx = obj.pts[i + 1].x - obj.pts[i].x;
+                    float ddy = obj.pts[i + 1].y - obj.pts[i].y;
+                    float seg_len = std::sqrt(ddx * ddx + ddy * ddy);
+                    int steps = std::max(2, static_cast<int>(total_steps * seg_len / total_len));
+                    for (int k = 0; k < steps; ++k) {
+                        float t = static_cast<float>(k) / static_cast<float>(steps - 1);
+                        float px = obj.pts[i].x + t * ddx;
+                        float py = obj.pts[i].y + t * ddy;
+                        out.push_back(LaserPoint::from_norm(px, py, r8, g8, b8, false));
+                    }
+                }
             }
         }
     }
@@ -665,8 +690,9 @@ static void apply_frame_fx(PointBuffer& buf, const FxLayer& layer, float t) {
             if (pt.blanked) { prev = true; continue; }
             if (prev)       { ++seg; prev = false; }
 
-            float dir_off  = direction_phase(e.direction, seg, centroids, e.dir_width, e.parts, e.segs);
-            float phase    = std::fmod(t * e.rate + e.offset + dir_off, 1.f);
+            float dir_off   = direction_phase(e.direction, seg, centroids, e.dir_width, e.parts, e.segs);
+            float raw_phase = t * e.rate + e.offset + dir_off;
+            float phase     = std::fmod(raw_phase, 1.f);
             if (phase < 0.f) phase += 1.f;
             if (e.width < 0.999f) {
                 float gate_val = (e.dir_width > 0.f)
@@ -758,11 +784,21 @@ static void apply_frame_fx(PointBuffer& buf, const FxLayer& layer, float t) {
             }
             case FrameFxType::Col2: {
                 if (e.use_custom_colors) {
-                    // Square-wave between col_a and col_b
-                    bool use_b = (phase > 0.5f);
-                    pt.r = static_cast<uint8_t>(std::clamp((use_b ? e.col_b_r : e.col_a_r) * 255.f, 0.f, 255.f));
-                    pt.g = static_cast<uint8_t>(std::clamp((use_b ? e.col_b_g : e.col_a_g) * 255.f, 0.f, 255.f));
-                    pt.b = static_cast<uint8_t>(std::clamp((use_b ? e.col_b_b : e.col_a_b) * 255.f, 0.f, 255.f));
+                    // Crossfade or snap between col_a and col_b
+                    float t_blend;
+                    if (e.crossfade > 0.001f) {
+                        float half_cf = e.crossfade * 0.25f;  // crossfade zone half-width
+                        float dist = std::abs(phase - 0.5f);
+                        if (dist > half_cf)
+                            t_blend = (phase >= 0.5f) ? 1.f : 0.f;
+                        else
+                            t_blend = 0.5f + (phase - 0.5f) / (2.f * half_cf) * 0.5f;
+                    } else {
+                        t_blend = (phase >= 0.5f) ? 1.f : 0.f;
+                    }
+                    pt.r = static_cast<uint8_t>(std::clamp((e.col_a_r + t_blend * (e.col_b_r - e.col_a_r)) * 255.f, 0.f, 255.f));
+                    pt.g = static_cast<uint8_t>(std::clamp((e.col_a_g + t_blend * (e.col_b_g - e.col_a_g)) * 255.f, 0.f, 255.f));
+                    pt.b = static_cast<uint8_t>(std::clamp((e.col_a_b + t_blend * (e.col_b_b - e.col_a_b)) * 255.f, 0.f, 255.f));
                 } else {
                     // Square-wave between object colour and hue-shifted colour.
                     // depth = hue rotation 0..1 (0.5 = complementary).
@@ -779,12 +815,33 @@ static void apply_frame_fx(PointBuffer& buf, const FxLayer& layer, float t) {
             }
             case FrameFxType::Col3: {
                 if (e.use_custom_colors) {
-                    // Snap-cycle through col_a, col_b, and a mid-blend
-                    float step_f = std::floor(phase * 3.f);
-                    float cr, cg, cb;
-                    if (step_f < 1.f) { cr = e.col_a_r; cg = e.col_a_g; cb = e.col_a_b; }
-                    else if (step_f < 2.f) { cr = e.col_b_r; cg = e.col_b_g; cb = e.col_b_b; }
-                    else { cr = (e.col_a_r + e.col_b_r) * 0.5f; cg = (e.col_a_g + e.col_b_g) * 0.5f; cb = (e.col_a_b + e.col_b_b) * 0.5f; }
+                    // Cycle through col_a, col_b, col_c with optional crossfade.
+                    // Phase is divided into 3 equal segments of 1/3 each.
+                    static constexpr float kSeg3 = 1.f / 3.f;
+                    float seg_phase = phase * 3.f;       // 0..3
+                    int   seg_idx   = static_cast<int>(seg_phase);  // 0, 1, 2
+                    if (seg_idx >= 3) seg_idx = 2;
+                    float local_t   = seg_phase - static_cast<float>(seg_idx);  // 0..1 within segment
+
+                    // Color triplet
+                    const float* colors_r[3] = { &e.col_a_r, &e.col_b_r, &e.col_c_r };
+                    const float* colors_g[3] = { &e.col_a_g, &e.col_b_g, &e.col_c_g };
+                    const float* colors_b[3] = { &e.col_a_b, &e.col_b_b, &e.col_c_b };
+
+                    float blend_t;
+                    if (e.crossfade > 0.001f) {
+                        float half_cf = e.crossfade * 0.5f;  // crossfade zone at end of segment
+                        if (local_t < (1.f - half_cf))
+                            blend_t = 0.f;
+                        else
+                            blend_t = (local_t - (1.f - half_cf)) / half_cf;
+                    } else {
+                        blend_t = 0.f;
+                    }
+                    int next_idx = (seg_idx + 1) % 3;
+                    float cr = *colors_r[seg_idx] + blend_t * (*colors_r[next_idx] - *colors_r[seg_idx]);
+                    float cg = *colors_g[seg_idx] + blend_t * (*colors_g[next_idx] - *colors_g[seg_idx]);
+                    float cb = *colors_b[seg_idx] + blend_t * (*colors_b[next_idx] - *colors_b[seg_idx]);
                     pt.r = static_cast<uint8_t>(std::clamp(cr * 255.f, 0.f, 255.f));
                     pt.g = static_cast<uint8_t>(std::clamp(cg * 255.f, 0.f, 255.f));
                     pt.b = static_cast<uint8_t>(std::clamp(cb * 255.f, 0.f, 255.f));
@@ -824,6 +881,94 @@ static void apply_frame_fx(PointBuffer& buf, const FxLayer& layer, float t) {
                 // Point is blanked when phase > depth.
                 if (phase > e.depth) pt.blanked = true;
                 continue;
+            }
+            case FrameFxType::Col4: {
+                if (e.use_custom_colors) {
+                    // Cycle through col_a, col_b, col_c, col_d with optional crossfade.
+                    float seg_phase = phase * 4.f;
+                    int   seg_idx   = static_cast<int>(seg_phase);
+                    if (seg_idx >= 4) seg_idx = 3;
+                    float local_t   = seg_phase - static_cast<float>(seg_idx);
+
+                    const float* colors_r[4] = { &e.col_a_r, &e.col_b_r, &e.col_c_r, &e.col_d_r };
+                    const float* colors_g[4] = { &e.col_a_g, &e.col_b_g, &e.col_c_g, &e.col_d_g };
+                    const float* colors_b[4] = { &e.col_a_b, &e.col_b_b, &e.col_c_b, &e.col_d_b };
+
+                    float blend_t;
+                    if (e.crossfade > 0.001f) {
+                        float half_cf = e.crossfade * 0.5f;
+                        blend_t = (local_t < (1.f - half_cf)) ? 0.f : (local_t - (1.f - half_cf)) / half_cf;
+                    } else {
+                        blend_t = 0.f;
+                    }
+                    int next_idx = (seg_idx + 1) % 4;
+                    float cr = *colors_r[seg_idx] + blend_t * (*colors_r[next_idx] - *colors_r[seg_idx]);
+                    float cg = *colors_g[seg_idx] + blend_t * (*colors_g[next_idx] - *colors_g[seg_idx]);
+                    float cb = *colors_b[seg_idx] + blend_t * (*colors_b[next_idx] - *colors_b[seg_idx]);
+                    pt.r = static_cast<uint8_t>(std::clamp(cr * 255.f, 0.f, 255.f));
+                    pt.g = static_cast<uint8_t>(std::clamp(cg * 255.f, 0.f, 255.f));
+                    pt.b = static_cast<uint8_t>(std::clamp(cb * 255.f, 0.f, 255.f));
+                } else {
+                    // Hue-shift path: 4 equally spaced hues
+                    float h, s, v;
+                    rgb_to_hsv(pt.r / 255.f, pt.g / 255.f, pt.b / 255.f, h, s, v);
+                    float step = std::floor(phase * 4.f) / 4.f;
+                    h = h + step * e.depth * 4.f;
+                    float r, g, b;
+                    hsv_to_rgb(h, s, v, r, g, b);
+                    pt.r = static_cast<uint8_t>(r * 255.f);
+                    pt.g = static_cast<uint8_t>(g * 255.f);
+                    pt.b = static_cast<uint8_t>(b * 255.f);
+                }
+                continue;
+            }
+            case FrameFxType::Col5: {
+                if (e.use_custom_colors) {
+                    // Cycle through col_a, col_b, col_c, col_d, col_e with optional crossfade.
+                    float seg_phase = phase * 5.f;
+                    int   seg_idx   = static_cast<int>(seg_phase);
+                    if (seg_idx >= 5) seg_idx = 4;
+                    float local_t   = seg_phase - static_cast<float>(seg_idx);
+
+                    const float* colors_r[5] = { &e.col_a_r, &e.col_b_r, &e.col_c_r, &e.col_d_r, &e.col_e_r };
+                    const float* colors_g[5] = { &e.col_a_g, &e.col_b_g, &e.col_c_g, &e.col_d_g, &e.col_e_g };
+                    const float* colors_b[5] = { &e.col_a_b, &e.col_b_b, &e.col_c_b, &e.col_d_b, &e.col_e_b };
+
+                    float blend_t;
+                    if (e.crossfade > 0.001f) {
+                        float half_cf = e.crossfade * 0.5f;
+                        blend_t = (local_t < (1.f - half_cf)) ? 0.f : (local_t - (1.f - half_cf)) / half_cf;
+                    } else {
+                        blend_t = 0.f;
+                    }
+                    int next_idx = (seg_idx + 1) % 5;
+                    float cr = *colors_r[seg_idx] + blend_t * (*colors_r[next_idx] - *colors_r[seg_idx]);
+                    float cg = *colors_g[seg_idx] + blend_t * (*colors_g[next_idx] - *colors_g[seg_idx]);
+                    float cb = *colors_b[seg_idx] + blend_t * (*colors_b[next_idx] - *colors_b[seg_idx]);
+                    pt.r = static_cast<uint8_t>(std::clamp(cr * 255.f, 0.f, 255.f));
+                    pt.g = static_cast<uint8_t>(std::clamp(cg * 255.f, 0.f, 255.f));
+                    pt.b = static_cast<uint8_t>(std::clamp(cb * 255.f, 0.f, 255.f));
+                } else {
+                    // Hue-shift path: 5 equally spaced hues
+                    float h, s, v;
+                    rgb_to_hsv(pt.r / 255.f, pt.g / 255.f, pt.b / 255.f, h, s, v);
+                    float step = std::floor(phase * 5.f) / 5.f;
+                    h = h + step * e.depth * 5.f;
+                    float r, g, b;
+                    hsv_to_rgb(h, s, v, r, g, b);
+                    pt.r = static_cast<uint8_t>(r * 255.f);
+                    pt.g = static_cast<uint8_t>(g * 255.f);
+                    pt.b = static_cast<uint8_t>(b * 255.f);
+                }
+                continue;
+            }
+            case FrameFxType::RotateContinuous: {
+                // Use raw_phase (unwrapped) so rotation never jumps at period boundaries.
+                float angle = raw_phase * kTwoPi * e.depth;
+                float cos_a = std::cos(angle), sin_a = std::sin(angle);
+                float rx = nx * cos_a - ny * sin_a;
+                float ry = nx * sin_a + ny * cos_a;
+                nx = rx; ny = ry; break;
             }
             }
             pt.x = static_cast<int16_t>(std::clamp(nx, -1.f, 1.f) * kScale);
@@ -1648,6 +1793,11 @@ void ShowEngine::process_commands()
                     FullCueEntry fce = c.entry;
                     fce.number.major = static_cast<int>(pb->cuelist.size()) + 1;
                     fce.number.minor = 0;
+                    // Save per-stream keyframe layers for multi-head recordings
+                    for (const auto& [sid, sp] : stream_prog_) {
+                        if (!sp.objects.objects.empty())
+                            fce.per_stream_kf[sid] = sp.objects;
+                    }
                     pb->cuelist.push_back(fce);
                     // Pre-select first cue so it shows in the UI without requiring a GO
                     if (first_cue) {
@@ -1868,6 +2018,19 @@ void ShowEngine::process_commands()
                 }
 
                 output_streams_ = std::move(new_streams);
+
+                // Remove latched programmer state for streams that no longer exist in the patch
+                {
+                    std::vector<int> current_ids;
+                    for (const auto& s : output_streams_)
+                        current_ids.push_back(s.config.id);
+                    for (auto it = stream_prog_.begin(); it != stream_prog_.end(); ) {
+                        if (std::find(current_ids.begin(), current_ids.end(), it->first) == current_ids.end())
+                            it = stream_prog_.erase(it);
+                        else
+                            ++it;
+                    }
+                }
 
                 // If patch mode owns any NDI stream, shut down the legacy ndi_sender_
                 // so it doesn't appear as a duplicate source in the NDI registry.
@@ -2659,10 +2822,10 @@ void ShowEngine::build_frame()
             // Per-object morphing: objects matched by ID morph position/color;
             // new objects fade in, removed objects fade out.
             const FullCueEntry& fce     = pb->cuelist[static_cast<size_t>(rs.current_idx)];
+            const FullCueEntry* prev_fce = (rs.prev_idx >= 0 && rs.prev_idx < static_cast<int>(pb->cuelist.size()))
+                                           ? &pb->cuelist[static_cast<size_t>(rs.prev_idx)] : nullptr;
             const KeyframeLayer& cur_kf = fce.keyframe_layer;
-            const KeyframeLayer* prev_kf = nullptr;
-            if (rs.prev_idx >= 0 && rs.prev_idx < static_cast<int>(pb->cuelist.size()))
-                prev_kf = &pb->cuelist[static_cast<size_t>(rs.prev_idx)].keyframe_layer;
+            const KeyframeLayer* prev_kf = prev_fce ? &prev_fce->keyframe_layer : nullptr;
 
             // Match objects by ID, with fallback to text for symmetry copies (__sym prefix)
             auto find_matching = [](const std::vector<LaserObject>& objs, const LaserObject& target) -> const LaserObject* {
@@ -2673,60 +2836,91 @@ void ShowEngine::build_frame()
                 return nullptr;
             };
 
-            KeyframeLayer morphed;
-            morphed.symmetry_mode = cur_kf.symmetry_mode;
-            morphed.sym_cx        = cur_kf.sym_cx;
-            morphed.sym_cy        = cur_kf.sym_cy;
-            for (const auto& co : cur_kf.objects) {
-                // Skip __sym copies — symmetry is applied at PointBuffer level
-                if (co.text.rfind("__sym", 0) == 0) continue;
-                const LaserObject* po = prev_kf ? find_matching(prev_kf->objects, co) : nullptr;
-                if (po && po->type == co.type && po->pts.size() == co.pts.size()) {
-                    LaserObject lerped = co;
-                    for (size_t pi = 0; pi < co.pts.size(); ++pi) {
-                        lerped.pts[pi].x = po->pts[pi].x + (co.pts[pi].x - po->pts[pi].x) * alpha;
-                        lerped.pts[pi].y = po->pts[pi].y + (co.pts[pi].y - po->pts[pi].y) * alpha;
-                    }
-                    lerped.r = po->r + (co.r - po->r) * alpha;
-                    lerped.g = po->g + (co.g - po->g) * alpha;
-                    lerped.b = po->b + (co.b - po->b) * alpha;
-                    morphed.objects.push_back(std::move(lerped));
-                } else {
-                    LaserObject obj = co;
-                    obj.r *= alpha; obj.g *= alpha; obj.b *= alpha;
-                    morphed.objects.push_back(std::move(obj));
-                }
-            }
-            if (prev_kf) {
-                float inv = 1.f - alpha;
-                for (const auto& po : prev_kf->objects) {
-                    if (po.text.rfind("__sym", 0) == 0) continue;
-                    if (!find_matching(cur_kf.objects, po)) {
-                        LaserObject obj = po;
-                        obj.r *= inv; obj.g *= inv; obj.b *= inv;
+            // Helper: build a morphed KeyframeLayer from a current and previous KeyframeLayer
+            auto build_morphed = [&](const KeyframeLayer& ckf, const KeyframeLayer* pkf) -> KeyframeLayer {
+                KeyframeLayer morphed;
+                morphed.symmetry_mode = ckf.symmetry_mode;
+                morphed.sym_cx        = ckf.sym_cx;
+                morphed.sym_cy        = ckf.sym_cy;
+                for (const auto& co : ckf.objects) {
+                    if (co.text.rfind("__sym", 0) == 0) continue;
+                    const LaserObject* po = pkf ? find_matching(pkf->objects, co) : nullptr;
+                    if (po && po->type == co.type && po->pts.size() == co.pts.size()) {
+                        LaserObject lerped = co;
+                        for (size_t pi = 0; pi < co.pts.size(); ++pi) {
+                            lerped.pts[pi].x = po->pts[pi].x + (co.pts[pi].x - po->pts[pi].x) * alpha;
+                            lerped.pts[pi].y = po->pts[pi].y + (co.pts[pi].y - po->pts[pi].y) * alpha;
+                        }
+                        lerped.r = po->r + (co.r - po->r) * alpha;
+                        lerped.g = po->g + (co.g - po->g) * alpha;
+                        lerped.b = po->b + (co.b - po->b) * alpha;
+                        morphed.objects.push_back(std::move(lerped));
+                    } else {
+                        LaserObject obj = co;
+                        obj.r *= alpha; obj.g *= alpha; obj.b *= alpha;
                         morphed.objects.push_back(std::move(obj));
                     }
                 }
-            }
-
-            if (!morphed.objects.empty()) {
-                // Apply Frame FX layer
-                const auto& assigned = pb->config.output_stream_ids;
-                if (!fce.per_stream_fx.empty() && !assigned.empty()) {
-                    // Per-stream FX path during fade: each stream may have a different FxLayer
-                    for (int sid : assigned) {
-                        PointBuffer stream_pts = render_keyframe_layer(morphed, 256);
-                        auto it = fce.per_stream_fx.find(sid);
-                        const FxLayer& stream_fx = (it != fce.per_stream_fx.end())
-                                                   ? it->second : fce.fx_layer;
-                        apply_frame_fx(stream_pts, stream_fx, fx_t);
-                        apply_global_geometry(stream_pts, fce.global_layer);
-                        apply_global_layer(stream_pts, fce.global_layer, fx_t, pb_intensity, gfx_smooth_);
-                        for (const auto& pt : stream_pts)
-                            per_stream_extras[sid].push_back(pt);
+                if (pkf) {
+                    float inv = 1.f - alpha;
+                    for (const auto& po : pkf->objects) {
+                        if (po.text.rfind("__sym", 0) == 0) continue;
+                        if (!find_matching(ckf.objects, po)) {
+                            LaserObject obj = po;
+                            obj.r *= inv; obj.g *= inv; obj.b *= inv;
+                            morphed.objects.push_back(std::move(obj));
+                        }
                     }
-                } else {
-                    // Global FX path during fade: all streams get the same output
+                }
+                return morphed;
+            };
+
+            const auto& assigned = pb->config.output_stream_ids;
+            // Build the effective stream list for the per-stream path:
+            //   1. Playback-level assignment (assigned) takes priority.
+            //   2. Fall back to the cue-level recorded stream IDs (fce.output_stream_ids).
+            //   3. Last resort: derive from the union of per_stream_kf / per_stream_fx keys.
+            std::vector<int> effective_ids;
+            if (!assigned.empty()) {
+                effective_ids = assigned;
+            } else if (!fce.output_stream_ids.empty()) {
+                effective_ids = fce.output_stream_ids;
+            } else {
+                for (const auto& kv : fce.per_stream_kf) effective_ids.push_back(kv.first);
+                for (const auto& kv : fce.per_stream_fx) {
+                    if (std::find(effective_ids.begin(), effective_ids.end(), kv.first) == effective_ids.end())
+                        effective_ids.push_back(kv.first);
+                }
+            }
+            if ((!fce.per_stream_fx.empty() || !fce.per_stream_kf.empty()) && !effective_ids.empty()) {
+                // Per-stream path during fade: each stream may have different geometry and/or FX
+                for (int sid : effective_ids) {
+                    // Resolve per-stream current and previous keyframe layers
+                    auto cur_kf_it = fce.per_stream_kf.find(sid);
+                    const KeyframeLayer& stream_cur_kf = (cur_kf_it != fce.per_stream_kf.end())
+                                                         ? cur_kf_it->second : cur_kf;
+                    const KeyframeLayer* stream_prev_kf = prev_kf;
+                    if (prev_fce && !prev_fce->per_stream_kf.empty()) {
+                        auto prev_kf_it = prev_fce->per_stream_kf.find(sid);
+                        if (prev_kf_it != prev_fce->per_stream_kf.end())
+                            stream_prev_kf = &prev_kf_it->second;
+                    }
+                    KeyframeLayer stream_morphed = build_morphed(stream_cur_kf, stream_prev_kf);
+                    if (stream_morphed.objects.empty()) continue;
+                    PointBuffer stream_pts = render_keyframe_layer(stream_morphed, 256);
+                    auto fx_it = fce.per_stream_fx.find(sid);
+                    const FxLayer& stream_fx = (fx_it != fce.per_stream_fx.end())
+                                               ? fx_it->second : fce.fx_layer;
+                    apply_frame_fx(stream_pts, stream_fx, fx_t);
+                    apply_global_geometry(stream_pts, fce.global_layer);
+                    apply_global_layer(stream_pts, fce.global_layer, fx_t, pb_intensity, gfx_smooth_);
+                    for (const auto& pt : stream_pts)
+                        per_stream_extras[sid].push_back(pt);
+                }
+            } else {
+                // Global path during fade: all streams get the same morphed geometry and FX
+                KeyframeLayer morphed = build_morphed(cur_kf, prev_kf);
+                if (!morphed.objects.empty()) {
                     PointBuffer morph_pts = render_keyframe_layer(morphed, 256);
                     apply_frame_fx(morph_pts, fce.fx_layer, fx_t);
                     apply_global_geometry(morph_pts, fce.global_layer);
@@ -2807,15 +3001,35 @@ void ShowEngine::build_frame()
             }
 
             const FullCueEntry& fce = pb->cuelist[static_cast<size_t>(rs.current_idx)];
-            if (fce.keyframe_layer.objects.empty()) continue;
+            if (fce.keyframe_layer.objects.empty() && fce.per_stream_kf.empty()) continue;
             const auto& assigned = pb->config.output_stream_ids;
-            if (!fce.per_stream_fx.empty() && !assigned.empty()) {
-                // Per-stream FX path: each assigned stream may have a different FxLayer
-                for (int sid : assigned) {
-                    PointBuffer stream_pts = render_keyframe_layer(fce.keyframe_layer, 256);
-                    auto it = fce.per_stream_fx.find(sid);
-                    const FxLayer& stream_fx = (it != fce.per_stream_fx.end())
-                                               ? it->second : fce.fx_layer;
+            // Build the effective stream list for the per-stream path:
+            //   1. Playback-level assignment (assigned) takes priority.
+            //   2. Fall back to the cue-level recorded stream IDs (fce.output_stream_ids).
+            //   3. Last resort: derive from the union of per_stream_kf / per_stream_fx keys.
+            std::vector<int> effective_ids;
+            if (!assigned.empty()) {
+                effective_ids = assigned;
+            } else if (!fce.output_stream_ids.empty()) {
+                effective_ids = fce.output_stream_ids;
+            } else {
+                for (const auto& kv : fce.per_stream_kf) effective_ids.push_back(kv.first);
+                for (const auto& kv : fce.per_stream_fx) {
+                    if (std::find(effective_ids.begin(), effective_ids.end(), kv.first) == effective_ids.end())
+                        effective_ids.push_back(kv.first);
+                }
+            }
+            if ((!fce.per_stream_fx.empty() || !fce.per_stream_kf.empty()) && !effective_ids.empty()) {
+                // Per-stream path: each assigned stream may have different geometry and/or FX
+                for (int sid : effective_ids) {
+                    auto kf_it = fce.per_stream_kf.find(sid);
+                    const KeyframeLayer& stream_kf = (kf_it != fce.per_stream_kf.end())
+                                                     ? kf_it->second : fce.keyframe_layer;
+                    if (stream_kf.objects.empty()) continue;
+                    PointBuffer stream_pts = render_keyframe_layer(stream_kf, 256);
+                    auto fx_it = fce.per_stream_fx.find(sid);
+                    const FxLayer& stream_fx = (fx_it != fce.per_stream_fx.end())
+                                               ? fx_it->second : fce.fx_layer;
                     apply_frame_fx(stream_pts, stream_fx, fx_t);
                     apply_global_geometry(stream_pts, fce.global_layer);
                     apply_global_layer(stream_pts, fce.global_layer, fx_t, pb_intensity, gfx_smooth_);
@@ -2823,7 +3037,8 @@ void ShowEngine::build_frame()
                         per_stream_extras[sid].push_back(pt);
                 }
             } else {
-                // Global FX path: all streams get the same output
+                // Global path: all streams get the same geometry and FX
+                if (fce.keyframe_layer.objects.empty()) continue;
                 PointBuffer pb_pts = render_keyframe_layer(fce.keyframe_layer, 256);
                 apply_frame_fx(pb_pts, fce.fx_layer, fx_t);
                 apply_global_geometry(pb_pts, fce.global_layer);

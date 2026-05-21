@@ -461,6 +461,15 @@ void to_json(nlohmann::json& j, const FrameFxEntry& v) {
         {"col_b_r",           v.col_b_r},
         {"col_b_g",           v.col_b_g},
         {"col_b_b",           v.col_b_b},
+        {"col_c_r",           v.col_c_r},
+        {"col_c_g",           v.col_c_g},
+        {"col_c_b",           v.col_c_b},
+        {"col_d_r",           v.col_d_r},
+        {"col_d_g",           v.col_d_g},
+        {"col_d_b",           v.col_d_b},
+        {"col_e_r",           v.col_e_r},
+        {"col_e_g",           v.col_e_g},
+        {"col_e_b",           v.col_e_b},
         {"use_custom_colors", v.use_custom_colors}
     };
 }
@@ -485,6 +494,15 @@ void from_json(const nlohmann::json& j, FrameFxEntry& v) {
     v.col_b_r           = j.value("col_b_r",           0.f);
     v.col_b_g           = j.value("col_b_g",           0.f);
     v.col_b_b           = j.value("col_b_b",           1.f);
+    v.col_c_r           = j.value("col_c_r",           0.f);
+    v.col_c_g           = j.value("col_c_g",           1.f);
+    v.col_c_b           = j.value("col_c_b",           0.f);
+    v.col_d_r           = j.value("col_d_r",           1.f);
+    v.col_d_g           = j.value("col_d_g",           1.f);
+    v.col_d_b           = j.value("col_d_b",           0.f);
+    v.col_e_r           = j.value("col_e_r",           1.f);
+    v.col_e_g           = j.value("col_e_g",           0.f);
+    v.col_e_b           = j.value("col_e_b",           1.f);
     v.use_custom_colors = j.value("use_custom_colors", false);
 }
 
@@ -568,6 +586,11 @@ void to_json(nlohmann::json& j, const FullCueEntry& v) {
             psf[std::to_string(k)] = fxl;
         j["per_stream_fx"] = std::move(psf);
     }
+
+    // Per-stream keyframe layers — only write when non-empty (JSON object, string keys)
+    j["per_stream_kf"] = nlohmann::json::object();
+    for (const auto& [sid, kf] : v.per_stream_kf)
+        j["per_stream_kf"][std::to_string(sid)] = kf;
 }
 
 void from_json(const nlohmann::json& j, FullCueEntry& v) {
@@ -614,6 +637,17 @@ void from_json(const nlohmann::json& j, FullCueEntry& v) {
         for (const auto& [sk, sv] : j.at("per_stream_fx").items()) {
             int sid = std::stoi(sk);
             from_json(sv, v.per_stream_fx[sid]);
+        }
+    }
+
+    // Per-stream keyframe layers — optional, absent in old files
+    v.per_stream_kf.clear();
+    if (j.contains("per_stream_kf")) {
+        for (const auto& [key, val] : j.at("per_stream_kf").items()) {
+            try {
+                int sid = std::stoi(key);
+                v.per_stream_kf[sid] = val.get<KeyframeLayer>();
+            } catch (...) {}
         }
     }
 }

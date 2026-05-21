@@ -905,6 +905,19 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
             s_clr_last_t = now;
             ++s_clr_count;
 
+            {
+                ProgrammerUndoEntry entry;
+                entry.frame_editor        = ctx.frame_editor;
+                entry.programmer_global   = ctx.programmer_global;
+                entry.programmer_fx_layer = ctx.programmer_fx_layer;
+                entry.programmer_feeds    = ctx.programmer_feeds;
+                entry.active_stream_ids   = state.active_stream_ids;
+                entry.active_group_id     = state.active_group_id;
+                ctx.programmer_undo_stack.push_back(std::move(entry));
+                if (ctx.programmer_undo_stack.size() > 32)
+                    ctx.programmer_undo_stack.erase(ctx.programmer_undo_stack.begin());
+            }
+
             ctx.frame_editor.objects.clear();
             ctx.frame_editor.selected_ids.clear();
             ctx.frame_editor.wip_points.clear();
@@ -938,6 +951,9 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
                     }
                     ctx.programmer_feeds.erase(key);
                 }
+                // Also erase individual stream keys for all selected streams
+                for (int id : state.active_stream_ids)
+                    ctx.programmer_feeds.erase(std::to_string(id));
             } else {
                 ctx.programmer_feeds.clear();
             }
@@ -1011,15 +1027,6 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Include: arm then click a cue to load it into the programmer");
 
-        // Visual indicator: show status when INCL is armed or a cue has been included
-        bool incl_active = ctx.incl_armed || ctx.included_cue_idx >= 0 || ctx.included_pb_id >= 0;
-        if (incl_active) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ctx.incl_armed
-                ? ImVec4(1.f, 0.92f, 0.20f, 1.f)   // bright yellow while waiting for click
-                : ImVec4(0.40f, 0.85f, 0.40f, 1.f));// green once a cue is loaded
-            ImGui::TextWrapped(ctx.incl_armed ? "INCL armed — click a cue" : "Cue included");
-            ImGui::PopStyleColor();
-        }
     }
 
     // ── UPDT ─────────────────────────────────────────────────────────────────
@@ -1032,16 +1039,29 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
             if (ctx.included_pb_id >= 0 && ctx.included_pb_cue_idx >= 0) {
                 // Update a playback cue
                 FullCueEntry fce;
-                if (ctx.included_pb_cue_idx < (int)state.pb_cuelist.size())
+                if (state.pb_cuelist_pb_id == ctx.included_pb_id &&
+                    ctx.included_pb_cue_idx < (int)state.pb_cuelist.size())
                     fce = state.pb_cuelist[ctx.included_pb_cue_idx];
                 fce.keyframe_layer.objects       = ctx.frame_editor.objects;
                 fce.keyframe_layer.symmetry_mode = static_cast<int>(ctx.frame_editor.symmetry);
                 fce.global_layer = ctx.programmer_global;
                 fce.fx_layer     = ctx.programmer_fx_layer;
+                fce.per_stream_fx.clear();
+                fce.per_stream_kf.clear();
                 for (const auto& [key, feed] : ctx.programmer_feeds) {
                     try {
                         int sid = std::stoi(key);
                         fce.per_stream_fx[sid] = feed.fx;
+                    } catch (...) {}
+                }
+                for (const auto& [key, feed] : ctx.programmer_feeds) {
+                    try {
+                        int sid = std::stoi(key);
+                        if (!feed.objects.empty()) {
+                            KeyframeLayer kf;
+                            kf.objects = feed.objects;
+                            fce.per_stream_kf[sid] = kf;
+                        }
                     } catch (...) {}
                 }
                 if (cbs.on_playback_cue_update)
@@ -1057,10 +1077,22 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
                 fce.keyframe_layer.symmetry_mode = static_cast<int>(ctx.frame_editor.symmetry);
                 fce.global_layer = ctx.programmer_global;
                 fce.fx_layer     = ctx.programmer_fx_layer;
+                fce.per_stream_fx.clear();
+                fce.per_stream_kf.clear();
                 for (const auto& [key, feed] : ctx.programmer_feeds) {
                     try {
                         int sid = std::stoi(key);
                         fce.per_stream_fx[sid] = feed.fx;
+                    } catch (...) {}
+                }
+                for (const auto& [key, feed] : ctx.programmer_feeds) {
+                    try {
+                        int sid = std::stoi(key);
+                        if (!feed.objects.empty()) {
+                            KeyframeLayer kf;
+                            kf.objects = feed.objects;
+                            fce.per_stream_kf[sid] = kf;
+                        }
                     } catch (...) {}
                 }
                 if (cbs.on_cuelist_update_entry)
@@ -2963,6 +2995,8 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                             auto& feed = ctx.programmer_feeds[std::to_string(sid)];
                             feed.fx = sfx;
                         }
+                        if (cbs.on_include_playback_cue)
+                            cbs.on_include_playback_cue(pb_id, ci);
                     }
                 }
 
@@ -5062,7 +5096,8 @@ void panel_frame_editor(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
                 "PanX","PanY","Rotate","Scale",
                 "BounceX","BounceY","ShakeX","ShakeY",
                 "ColCycle","ColPulse","RainbowTrl","Spiral",
-                "Col2","Col3","ColFlick","Strobe"
+                "Col2","Col3","ColFlick","Strobe",
+                "Col4","Col5","RotateCont"
             };
             static const char* s_fxdir_names[] = {"Sync","Fwd","Rev","C-Out","C-In","Alt","Rand"};
 
@@ -5186,6 +5221,8 @@ void panel_frame_editor(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
                     {
                         bool is_color_fx = (ffe.type == FrameFxType::Col2
                                          || ffe.type == FrameFxType::Col3
+                                         || ffe.type == FrameFxType::Col4
+                                         || ffe.type == FrameFxType::Col5
                                          || ffe.type == FrameFxType::ColFlick
                                          || ffe.type == FrameFxType::ColorCycle
                                          || ffe.type == FrameFxType::ColorPulse
@@ -5208,6 +5245,18 @@ void panel_frame_editor(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
                             ImGui::ColorEdit3("##ca", &ffe.col_a_r, ImGuiColorEditFlags_NoLabel);
                             ImGui::TextUnformatted("Color B:"); ImGui::SameLine();
                             ImGui::ColorEdit3("##cb", &ffe.col_b_r, ImGuiColorEditFlags_NoLabel);
+                            if (ffe.type == FrameFxType::Col3 || ffe.type == FrameFxType::Col4 || ffe.type == FrameFxType::Col5) {
+                                ImGui::TextUnformatted("Color C:"); ImGui::SameLine();
+                                ImGui::ColorEdit3("##cc", &ffe.col_c_r, ImGuiColorEditFlags_NoLabel);
+                            }
+                            if (ffe.type == FrameFxType::Col4 || ffe.type == FrameFxType::Col5) {
+                                ImGui::TextUnformatted("Color D:"); ImGui::SameLine();
+                                ImGui::ColorEdit3("##cd", &ffe.col_d_r, ImGuiColorEditFlags_NoLabel);
+                            }
+                            if (ffe.type == FrameFxType::Col5) {
+                                ImGui::TextUnformatted("Color E:"); ImGui::SameLine();
+                                ImGui::ColorEdit3("##ce", &ffe.col_e_r, ImGuiColorEditFlags_NoLabel);
+                            }
                             if (!ffe.use_custom_colors) ImGui::EndDisabled();
                             ImGui::EndPopup();
                         }
@@ -7774,15 +7823,25 @@ static void draw_show_view_grid(UIState& state, LayoutContext& ctx, LayoutCallba
                         } catch (...) { /* skip combo keys like "1,2" */ }
                     }
                 }
-                // If per-stream FX were recorded, update the playback's output_stream_ids
-                // so the engine's per-stream path activates (it requires assigned non-empty).
-                // The stream IDs come directly from the keys that were just inserted.
-                if (!fce.per_stream_fx.empty() && cbs.on_playback_config) {
+                // Save per-stream keyframe layers for multi-head programming
+                for (const auto& [key, feed] : ctx.programmer_feeds) {
+                    try {
+                        int sid = std::stoi(key);
+                        if (!feed.objects.empty()) {
+                            KeyframeLayer kf;
+                            kf.objects = feed.objects;
+                            fce.per_stream_kf[sid] = kf;
+                        }
+                    } catch (...) {}
+                }
+                // Always set output_stream_ids to the currently active streams so the
+                // engine routes the cue exclusively to those heads (not broadcast to all).
+                // Active streams are always the authoritative source regardless of per-stream FX.
+                if (cbs.on_playback_config) {
                     UIState::PlaybackConf& conf = state.pb_conf[i];
-                    conf.output_stream_ids.clear();
-                    for (const auto& [sid, _fx] : fce.per_stream_fx)
-                        conf.output_stream_ids.push_back(sid);
-                    cbs.on_playback_config(pb.id, conf);
+                    conf.output_stream_ids = state.active_stream_ids;
+                    if (!conf.output_stream_ids.empty())
+                        cbs.on_playback_config(pb.id, conf);
                 }
                 cbs.on_record_frame_to_playback(pb.id, fce);
                 ctx.rec_armed = false;
@@ -8073,15 +8132,25 @@ void panel_playback_bar(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
                         } catch (...) { /* skip combo keys like "1,2" */ }
                     }
                 }
-                // If per-stream FX were recorded, update the playback's output_stream_ids
-                // so the engine's per-stream path activates (it requires assigned non-empty).
-                // The stream IDs come directly from the keys that were just inserted.
-                if (!fce.per_stream_fx.empty() && cbs.on_playback_config) {
+                // Save per-stream keyframe layers for multi-head programming
+                for (const auto& [key, feed] : ctx.programmer_feeds) {
+                    try {
+                        int sid = std::stoi(key);
+                        if (!feed.objects.empty()) {
+                            KeyframeLayer kf;
+                            kf.objects = feed.objects;
+                            fce.per_stream_kf[sid] = kf;
+                        }
+                    } catch (...) {}
+                }
+                // Always set output_stream_ids to the currently active streams so the
+                // engine routes the cue exclusively to those heads (not broadcast to all).
+                // Active streams are always the authoritative source regardless of per-stream FX.
+                if (cbs.on_playback_config) {
                     UIState::PlaybackConf& conf = state.pb_conf[i];
-                    conf.output_stream_ids.clear();
-                    for (const auto& [sid, _fx] : fce.per_stream_fx)
-                        conf.output_stream_ids.push_back(sid);
-                    cbs.on_playback_config(pb.id, conf);
+                    conf.output_stream_ids = state.active_stream_ids;
+                    if (!conf.output_stream_ids.empty())
+                        cbs.on_playback_config(pb.id, conf);
                 }
                 cbs.on_record_frame_to_playback(pb.id, fce);
                 ctx.rec_armed = false;

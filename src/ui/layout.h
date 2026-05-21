@@ -448,6 +448,7 @@ struct LayoutCallbacks {
 
     // INCLUDE / UPDATE — load a cue into the programmer, then update it back
     std::function<void(int cue_idx)>                    on_include_cue;
+    std::function<void(int pb_id, int cue_idx)>         on_include_playback_cue;
     std::function<void(int cue_idx, FullCueEntry)>      on_update_included_cue;
 
     // Cuestack editor callbacks
@@ -506,6 +507,18 @@ struct LayoutCallbacks {
     // Explicit programmer clear — ChamSys rule: only this callback (wired to
     // cmd::ClearProgrammer) may wipe per-stream programmer content.
     std::function<void()> on_clear_programmer;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Programmer undo entry — snapshot taken before CLR wipes the programmer
+// ─────────────────────────────────────────────────────────────────────────────
+struct ProgrammerUndoEntry {
+    FrameEditorState                                     frame_editor;
+    GlobalLayer                                          programmer_global;
+    FxLayer                                              programmer_fx_layer;
+    std::unordered_map<std::string, ProgrammerFeedState> programmer_feeds;
+    std::vector<int>                                     active_stream_ids;
+    int                                                  active_group_id = -1;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -576,6 +589,9 @@ struct LayoutContext {
 
     // MagicQ-style programmer feeds: saved state per output selection
     std::unordered_map<std::string, ProgrammerFeedState> programmer_feeds;
+
+    // Undo stack for CLR (max 32 entries)
+    std::vector<ProgrammerUndoEntry> programmer_undo_stack;
 
     // Panel open/close flags (used by ImGui::Begin with bool* p_open)
     bool panel_cue_lib_open    = true;
