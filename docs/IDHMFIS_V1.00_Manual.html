@@ -1,0 +1,1430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IDHMFIS V1.1 — User Manual</title>
+<style>
+/* ── Reset & Base ─────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #0d0d12;
+  --bg2:       #13131c;
+  --bg3:       #1a1a28;
+  --border:    #2a2a42;
+  --text:      #dde1ff;
+  --text-dim:  #8891b8;
+  --accent:    #5c6ef8;
+  --accent2:   #7b8fff;
+  --green:     #10b981;
+  --red:       #f43f5e;
+  --yellow:    #fbbf24;
+  --orange:    #f97316;
+  --code-bg:   #0a0a14;
+  --radius:    6px;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+/* ── Layout ───────────────────────────────────────────── */
+.page-wrapper {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 24px 80px;
+}
+
+/* ── Cover ────────────────────────────────────────────── */
+.cover {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  padding: 60px 24px;
+  border-bottom: 1px solid var(--border);
+  background: radial-gradient(ellipse at 50% 40%, #1a1a35 0%, var(--bg) 70%);
+}
+
+.cover-logo {
+  font-size: clamp(2.4rem, 6vw, 4.5rem);
+  font-weight: 900;
+  letter-spacing: -1px;
+  background: linear-gradient(135deg, var(--accent2) 0%, var(--green) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 16px;
+}
+
+.cover-fullname {
+  font-size: clamp(0.85rem, 2vw, 1.1rem);
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 32px;
+  max-width: 560px;
+}
+
+.cover-version {
+  display: inline-block;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 22px;
+  font-size: 0.95rem;
+  color: var(--accent2);
+  margin-bottom: 20px;
+  letter-spacing: 0.05em;
+}
+
+.cover-tagline {
+  font-size: 1.15rem;
+  color: var(--text-dim);
+  margin-top: 8px;
+}
+
+.cover-badge-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 40px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.badge {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 14px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+/* ── TOC ──────────────────────────────────────────────── */
+.toc {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px 36px;
+  margin: 48px 0;
+}
+
+.toc h2 {
+  font-size: 1.1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+}
+
+.toc ol {
+  list-style: none;
+  counter-reset: toc-counter;
+}
+
+.toc > ol > li {
+  counter-increment: toc-counter;
+  margin-bottom: 6px;
+}
+
+.toc a {
+  color: var(--text);
+  text-decoration: none;
+  transition: color 0.15s;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.toc a:hover { color: var(--accent2); }
+
+.toc a .toc-num {
+  min-width: 28px;
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.toc a .toc-dots {
+  flex: 1;
+  border-bottom: 1px dotted var(--border);
+  margin-bottom: 3px;
+}
+
+/* ── Sections ─────────────────────────────────────────── */
+.section {
+  margin-top: 64px;
+  padding-top: 8px;
+}
+
+h1.section-title {
+  font-size: 1.9rem;
+  font-weight: 700;
+  color: var(--text);
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: 10px;
+  margin-bottom: 28px;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+h1.section-title .sec-num {
+  color: var(--accent);
+  font-size: 1rem;
+  font-weight: 600;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 10px;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+h2.subsection {
+  font-size: 1.2rem;
+  color: var(--accent2);
+  margin: 32px 0 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+h3.sub3 {
+  font-size: 1.0rem;
+  color: var(--text);
+  margin: 20px 0 8px;
+  font-weight: 600;
+}
+
+p { margin-bottom: 14px; }
+p:last-child { margin-bottom: 0; }
+
+ul, ol {
+  padding-left: 24px;
+  margin-bottom: 14px;
+}
+
+li { margin-bottom: 5px; }
+
+strong { color: var(--accent2); font-weight: 600; }
+
+/* ── Callout boxes ────────────────────────────────────── */
+.callout {
+  border-left: 3px solid var(--accent);
+  background: var(--bg3);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 14px 18px;
+  margin: 20px 0;
+  font-size: 0.92rem;
+  color: var(--text-dim);
+}
+
+.callout.tip    { border-color: var(--green); }
+.callout.warn   { border-color: var(--yellow); color: #f5e89a; }
+.callout.danger { border-color: var(--red); color: #ffa0a0; }
+
+.callout strong { color: inherit; }
+
+/* ── Code / Pre ───────────────────────────────────────── */
+code {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.87em;
+  color: var(--accent2);
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  overflow-x: auto;
+  margin: 16px 0;
+  line-height: 1.55;
+}
+
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.88em;
+  color: var(--text-dim);
+}
+
+/* ── Tables ───────────────────────────────────────────── */
+.table-wrap { overflow-x: auto; margin: 16px 0; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+thead tr {
+  background: var(--bg3);
+  border-bottom: 2px solid var(--accent);
+}
+
+thead th {
+  text-align: left;
+  padding: 10px 14px;
+  color: var(--accent2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+tbody tr {
+  border-bottom: 1px solid var(--border);
+}
+
+tbody tr:hover { background: var(--bg3); }
+
+tbody td {
+  padding: 9px 14px;
+  vertical-align: top;
+}
+
+tbody td:first-child {
+  font-family: "JetBrains Mono", Consolas, monospace;
+  color: var(--accent2);
+  white-space: nowrap;
+}
+
+/* ── SVG diagrams ─────────────────────────────────────── */
+.diagram-wrap {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin: 20px 0;
+  text-align: center;
+  overflow-x: auto;
+}
+
+.diagram-caption {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  margin-top: 10px;
+  font-style: italic;
+}
+
+/* ── Key label ────────────────────────────────────────── */
+kbd {
+  display: inline-block;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-bottom: 2px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 8px;
+  font-family: inherit;
+  font-size: 0.82em;
+  color: var(--text);
+  margin: 0 1px;
+}
+
+/* ── Back to top ──────────────────────────────────────── */
+#back-to-top {
+  position: fixed;
+  bottom: 32px;
+  right: 32px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  width: 44px;
+  height: 44px;
+  font-size: 1.2rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
+  box-shadow: 0 2px 12px rgba(92,110,248,0.4);
+  z-index: 999;
+}
+
+#back-to-top.visible {
+  opacity: 1;
+  pointer-events: all;
+}
+
+/* ── Horizontal rule ──────────────────────────────────── */
+hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 32px 0;
+}
+
+/* ── Tool icon cell ───────────────────────────────────── */
+.tool-icon {
+  text-align: center;
+  font-size: 1.1em;
+}
+
+/* ── Changelog ────────────────────────────────────────── */
+.changelog-block {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin: 12px 0;
+}
+
+.changelog-version {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--accent2);
+  margin-bottom: 12px;
+}
+
+.changelog-category {
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  margin: 14px 0 6px;
+}
+
+.changelog-items {
+  list-style: none;
+  padding: 0;
+}
+
+.changelog-items li {
+  font-size: 0.88rem;
+  color: var(--text-dim);
+  padding: 2px 0 2px 18px;
+  position: relative;
+}
+
+.changelog-items li::before {
+  content: "+";
+  position: absolute;
+  left: 0;
+  color: var(--green);
+  font-weight: 700;
+}
+
+/* ── @media print ─────────────────────────────────────── */
+@media print {
+  :root { --bg: #fff; --bg2: #f5f5f8; --bg3: #eeeeee; --border: #ccc; --text: #111; --text-dim: #555; --accent: #3a50d9; --accent2: #3a50d9; --green: #0a7f5a; --code-bg: #f0f0f5; }
+  body { font-size: 12pt; }
+  #back-to-top { display: none; }
+  .cover { min-height: auto; padding: 40px 0; page-break-after: always; }
+  .toc { page-break-after: always; }
+  .section { page-break-inside: avoid; }
+  h1.section-title { page-break-after: avoid; }
+  pre, .diagram-wrap { page-break-inside: avoid; }
+  a { color: var(--accent); text-decoration: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════ COVER PAGE ══════ -->
+<div id="top" class="cover">
+  <div class="cover-logo">IDHMFIS</div>
+  <div class="cover-fullname">I Don't Have Money For ILDA Software</div>
+  <div class="cover-version">Version 1.1 &nbsp;·&nbsp; May 2026</div>
+  <div class="cover-tagline">Open-source Laser Show Programming Software</div>
+  <div class="cover-badge-row">
+    <span class="badge">Windows 10/11 64-bit</span>
+    <span class="badge">NDI Output</span>
+    <span class="badge">40 Playbacks</span>
+    <span class="badge">Frame Editor + Undo</span>
+    <span class="badge">MIDI / OSC</span>
+  </div>
+  <div style="margin-top:24px; font-size:0.85rem; color:var(--text-dim);">Created by Onni Kauppinen</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<div class="page-wrapper">
+
+<!-- ═══════════════════════════════════════════════════ TABLE OF CONTENTS -->
+<nav class="toc" id="toc">
+  <h2>Table of Contents</h2>
+  <ol>
+    <li><a href="#s1"><span class="toc-num">1.</span><span>Getting Started</span><span class="toc-dots"></span></a></li>
+    <li><a href="#s2"><span class="toc-num">2.</span><span>Interface Overview</span><span class="toc-dots"></span></a></li>
+    <li><a href="#s3"><span class="toc-num">3.</span><span>Cue System</span><span class="toc-dots"></span></a></li>
+    <li><a href="#s4"><span class="toc-num">4.</span><span>Frame / Keyframe Editor</span><span class="toc-dots"></span></a></li>
+    <li><a href="#s5"><span class="toc-num">5.</span><span>Multiple Playbacks (MagicQ-style)</span><span class="toc-dots"></span></a></li>
+    <li><a href="#s6"><span class="toc-num">6.</span><span>Generator Cues</span><span class="toc-dots"></span></a></li>
+    <li><a href="#s7"><span class="toc-num">7.</span><span>NDI Output</span><span class="toc-dots"></span></a></li>
+    <li><a href="#s8"><span class="toc-num">8.</span><span>Setup Window</span><span class="toc-dots"></span></a></li>
+    <li><a href="#s9"><span class="toc-num">9.</span><span>MIDI Learn</span><span class="toc-dots"></span></a></li>
+    <li><a href="#s10"><span class="toc-num">10.</span><span>Auto-Save and Recovery</span><span class="toc-dots"></span></a></li>
+    <li><a href="#s11"><span class="toc-num">11.</span><span>Keyboard Shortcuts</span><span class="toc-dots"></span></a></li>
+    <li><a href="#s12"><span class="toc-num">12.</span><span>Changelog</span><span class="toc-dots"></span></a></li>
+  </ol>
+</nav>
+
+<!-- ═══════════════════════════════════════════════════ SECTION 1 ═══════ -->
+<section class="section" id="s1">
+  <h1 class="section-title"><span class="sec-num">§ 1</span>Getting Started</h1>
+
+  <h2 class="subsection">System Requirements</h2>
+  <ul>
+    <li><strong>OS:</strong> Windows 10 or Windows 11 (64-bit). Other platforms are not supported in V1.1.</li>
+    <li><strong>CPU:</strong> Any modern x64 processor. The show engine runs a dedicated 1000 Hz tick thread; 4+ cores are recommended for smooth UI alongside the engine.</li>
+    <li><strong>RAM:</strong> 4 GB minimum, 8 GB recommended.</li>
+    <li><strong>GPU:</strong> Any DirectX 11-capable GPU for the ImGui renderer.</li>
+    <li><strong>NDI Runtime:</strong> The NDI output feature requires the NewTek/Vizrt NDI Runtime to be installed. IDHMFIS ships its own dynamic loader (<code>NdiSender</code>) so it runs safely even without the runtime — NDI simply stays inactive if the DLL is not found. Download NDI Tools free from <code>ndi.video</code>.</li>
+    <li><strong>Build tools:</strong> CMake 3.22+ and Ninja (required for building from source).</li>
+  </ul>
+
+  <h2 class="subsection">Installation (Building from Source)</h2>
+  <p>IDHMFIS V1.1 is distributed as source code built with CMake and Ninja.</p>
+  <ol>
+    <li>Clone or extract the repository to a local folder (e.g., <code>C:\IDHMFIS</code>).</li>
+    <li>Open a Developer Command Prompt for Visual Studio (or any shell with <code>cl.exe</code> and <code>cmake</code> on the path).</li>
+    <li>Run the following commands:</li>
+  </ol>
+  <pre><code>cd C:\IDHMFIS
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel</code></pre>
+  <ol start="4">
+    <li>The executable <code>IDHMFIS.exe</code> will be produced in the <code>build\</code> directory.</li>
+    <li>Copy or run the executable from the build directory. No installer is required.</li>
+  </ol>
+  <div class="callout tip">
+    <strong>Tip:</strong> If you encounter linker errors about missing NDI symbols, this is expected. The build does not require the NDI SDK — the runtime library is loaded dynamically at startup.
+  </div>
+
+  <h2 class="subsection">First Launch Walkthrough</h2>
+  <p>When you first launch IDHMFIS, you will see:</p>
+  <ol>
+    <li><strong>A recovery dialog</strong> — only appears if a previous session ended abnormally. If this is a fresh install, click <em>Discard</em>.</li>
+    <li><strong>The main window</strong> — three panels are visible: the Frame Editor (center-left), the Laser Preview (center-right), and the 10-Playback fader strip at the bottom.</li>
+    <li><strong>Output is OFF by default</strong> — for safety, laser output is disabled at startup. Look for the <em>OUTPUT ENABLE</em> button in the Transport bar and click it when you are ready to send output.</li>
+    <li><strong>NDI status</strong> — the Transport bar shows an NDI indicator. If the NDI runtime is installed, streaming begins immediately. Connect NDI Studio Monitor (free) on the same network to see the laser preview as a video signal.</li>
+  </ol>
+
+  <h2 class="subsection">Quick Start: Creating Your First Cue in 5 Steps</h2>
+  <ol>
+    <li><strong>Draw something.</strong> In the Frame Editor (the large canvas on the left), make sure the <em>Line</em> tool is active (press <kbd>L</kbd> or click the line icon in the toolbar). Click two points on the canvas to place a line segment.</li>
+    <li><strong>Set a color.</strong> In the properties panel below the canvas, click the color swatch and choose a color.</li>
+    <li><strong>Record to a cue.</strong> Click the <em>Record KF</em> button at the top of the Frame Editor. A dialog will ask for a cue name. Type a name and press Enter.</li>
+    <li><strong>Assign to a playback.</strong> Drag your new cue from the Cue Library onto one of the 10 playback slots at the bottom of the screen — or click a slot's <em>GO</em> button to activate the most recently recorded cue.</li>
+    <li><strong>Enable output and GO.</strong> Click <em>OUTPUT ENABLE</em> in the Transport bar, then press the <em>GO</em> button on the playback strip. The laser pattern appears in the preview and on any connected NDI receiver.</li>
+  </ol>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ SECTION 2 ═══════ -->
+<section class="section" id="s2">
+  <h1 class="section-title"><span class="sec-num">§ 2</span>Interface Overview</h1>
+
+  <h2 class="subsection">Main Window Layout</h2>
+  <p>IDHMFIS uses a docked panel layout powered by Dear ImGui. The window is divided into fixed zones that persist across sessions.</p>
+
+  <div class="diagram-wrap">
+    <svg viewBox="0 0 620 420" width="620" height="420" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;font-family:system-ui,sans-serif;">
+      <!-- Background -->
+      <rect width="620" height="420" rx="8" fill="#13131c" stroke="#2a2a42" stroke-width="1.5"/>
+
+      <!-- Menu Bar -->
+      <rect x="10" y="10" width="600" height="34" rx="4" fill="#1a1a28" stroke="#2a2a42"/>
+      <text x="310" y="32" text-anchor="middle" fill="#8891b8" font-size="12" font-weight="600">MENU BAR &nbsp;—&nbsp; File &nbsp; Edit &nbsp; View &nbsp; Help</text>
+
+      <!-- Transport Bar -->
+      <rect x="10" y="52" width="600" height="44" rx="4" fill="#1e1e30" stroke="#5c6ef8" stroke-width="1.5"/>
+      <text x="310" y="79" text-anchor="middle" fill="#7b8fff" font-size="12" font-weight="700">TRANSPORT BAR &nbsp;·&nbsp; Play / Stop / BPM / Master / Output Enable</text>
+
+      <!-- Frame Editor panel -->
+      <rect x="10" y="104" width="360" height="232" rx="4" fill="#101018" stroke="#2a2a42"/>
+      <rect x="10" y="104" width="360" height="22" rx="4" fill="#1a1a28" stroke="#2a2a42"/>
+      <text x="190" y="119" text-anchor="middle" fill="#5c6ef8" font-size="11" font-weight="700">FRAME / KEYFRAME EDITOR (Primary Programmer)</text>
+      <!-- ruler lines to suggest canvas -->
+      <line x1="10" y1="126" x2="370" y2="126" stroke="#2a2a42"/>
+      <!-- canvas crosshair -->
+      <line x1="190" y1="130" x2="190" y2="332" stroke="#2a2a3a" stroke-dasharray="4,3"/>
+      <line x1="14" y1="222" x2="366" y2="222" stroke="#2a2a3a" stroke-dasharray="4,3"/>
+      <!-- sample laser lines -->
+      <path d="M100,175 L250,280" stroke="#10b981" stroke-width="1.5" opacity="0.6"/>
+      <path d="M80,230 C130,160 230,160 290,240" stroke="#5c6ef8" stroke-width="1.5" opacity="0.6" fill="none"/>
+      <!-- toolbar strip on left edge -->
+      <rect x="10" y="126" width="22" height="210" fill="#1a1a28" stroke="#2a2a42"/>
+      <text x="21" y="168" text-anchor="middle" fill="#5c6ef8" font-size="8" writing-mode="vertical-rl">TOOLS</text>
+      <!-- layer tabs -->
+      <rect x="32" y="126" width="50" height="16" rx="2" fill="#2a2a42"/>
+      <text x="57" y="137" text-anchor="middle" fill="#dde1ff" font-size="9">Global</text>
+      <rect x="84" y="126" width="40" height="16" rx="2" fill="#5c6ef8"/>
+      <text x="104" y="137" text-anchor="middle" fill="#fff" font-size="9">FX</text>
+      <rect x="126" y="126" width="62" height="16" rx="2" fill="#2a2a42"/>
+      <text x="157" y="137" text-anchor="middle" fill="#dde1ff" font-size="9">Keyframe</text>
+      <!-- timeline strip at bottom of editor -->
+      <rect x="10" y="310" width="360" height="26" fill="#0d0d18" stroke="#2a2a42"/>
+      <text x="190" y="327" text-anchor="middle" fill="#8891b8" font-size="10">KEYFRAME TIMELINE</text>
+
+      <!-- Preview panel -->
+      <rect x="378" y="104" width="232" height="232" rx="4" fill="#0a0a12" stroke="#2a2a42"/>
+      <rect x="378" y="104" width="232" height="22" rx="4" fill="#1a1a28" stroke="#2a2a42"/>
+      <text x="494" y="119" text-anchor="middle" fill="#5c6ef8" font-size="11" font-weight="700">LASER PREVIEW</text>
+      <!-- simulated preview content -->
+      <ellipse cx="494" cy="228" rx="72" ry="52" stroke="#10b981" stroke-width="1.5" fill="none" opacity="0.7"/>
+      <path d="M450,195 C480,165 520,165 540,200 C525,240 470,240 450,195Z" stroke="#5c6ef8" stroke-width="1" fill="none" opacity="0.5"/>
+      <circle cx="494" cy="228" r="2" fill="#10b981" opacity="0.9"/>
+
+      <!-- Playback Bar -->
+      <rect x="10" y="344" width="600" height="66" rx="4" fill="#0d0d18" stroke="#fbbf24" stroke-width="1.5"/>
+      <text x="310" y="364" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="700">10 PLAYBACK FADERS (always visible)</text>
+      <!-- mini faders -->
+      <g fill="#1a1a28" stroke="#2a2a42">
+        <rect x="18"  y="370" width="50" height="34" rx="3"/>
+        <rect x="74"  y="370" width="50" height="34" rx="3"/>
+        <rect x="130" y="370" width="50" height="34" rx="3"/>
+        <rect x="186" y="370" width="50" height="34" rx="3"/>
+        <rect x="242" y="370" width="50" height="34" rx="3"/>
+        <rect x="298" y="370" width="50" height="34" rx="3"/>
+        <rect x="354" y="370" width="50" height="34" rx="3"/>
+        <rect x="410" y="370" width="50" height="34" rx="3"/>
+        <rect x="466" y="370" width="50" height="34" rx="3"/>
+        <rect x="522" y="370" width="50" height="34" rx="3"/>
+      </g>
+      <text x="43"  y="393" text-anchor="middle" fill="#8891b8" font-size="8">PB 1</text>
+      <text x="99"  y="393" text-anchor="middle" fill="#8891b8" font-size="8">PB 2</text>
+      <text x="155" y="393" text-anchor="middle" fill="#8891b8" font-size="8">PB 3</text>
+      <text x="211" y="393" text-anchor="middle" fill="#8891b8" font-size="8">PB 4</text>
+      <text x="267" y="393" text-anchor="middle" fill="#8891b8" font-size="8">PB 5</text>
+      <text x="323" y="393" text-anchor="middle" fill="#8891b8" font-size="8">PB 6</text>
+      <text x="379" y="393" text-anchor="middle" fill="#8891b8" font-size="8">PB 7</text>
+      <text x="435" y="393" text-anchor="middle" fill="#8891b8" font-size="8">PB 8</text>
+      <text x="491" y="393" text-anchor="middle" fill="#8891b8" font-size="8">PB 9</text>
+      <text x="547" y="393" text-anchor="middle" fill="#8891b8" font-size="8">PB 10</text>
+    </svg>
+    <p class="diagram-caption">Figure 2.1 — Main window layout overview</p>
+  </div>
+
+  <h3 class="sub3">Menu Bar</h3>
+  <p>The top bar contains standard menus: <strong>File</strong> (New, Open, Save, Save As, Setup, Recent Files), <strong>Edit</strong> (Undo, Redo), <strong>View</strong> (panel toggles, MIDI Learn), and <strong>Help</strong>.</p>
+
+  <h3 class="sub3">Transport Bar</h3>
+  <p>The Transport bar is always visible below the menu. It contains:</p>
+  <ul>
+    <li><strong>Play / Pause / Stop</strong> buttons for the timeline playhead.</li>
+    <li><strong>BPM field</strong> — drag to change tempo. This affects beat-synced chasers and generators.</li>
+    <li><strong>Master Intensity</strong> — a global brightness fader (0–100%). Affects all active playbacks simultaneously.</li>
+    <li><strong>OUTPUT ENABLE</strong> — a safety toggle. Laser output is off until this is explicitly enabled.</li>
+    <li><strong>NDI status indicator</strong> — green when streaming, grey when not.</li>
+    <li><strong>Gear icon</strong> — opens the Setup window.</li>
+  </ul>
+
+  <h3 class="sub3">Frame / Keyframe Editor (Primary Programmer)</h3>
+  <p>Occupies the large left panel. This is where you draw laser content: shapes, curves, text, and keyframe animations. By default it opens to the <em>Keyframe</em> layer. See <a href="#s4">Section 4</a> for full detail.</p>
+
+  <h3 class="sub3">Laser Preview</h3>
+  <p>The right panel renders a real-time rasterized preview of what the laser output currently looks like. The same image is simultaneously sent over NDI. You can zoom and pan the preview with the scroll wheel and mouse drag.</p>
+
+  <h3 class="sub3">Playback Fader Strip</h3>
+  <p>A permanent strip of 10 playback slots runs across the bottom of the screen. Each slot has its own GO / STOP / CLEAR / BLIND buttons and an intensity fader. See <a href="#s5">Section 5</a> for detail.</p>
+
+  <h2 class="subsection">Keyframe Editor Tool Panel (Detail)</h2>
+
+  <div class="diagram-wrap">
+    <svg viewBox="0 0 580 180" width="580" height="180" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;font-family:system-ui,sans-serif;">
+      <rect width="580" height="180" rx="8" fill="#13131c" stroke="#2a2a42"/>
+      <!-- toolbar -->
+      <rect x="10" y="10" width="24" height="160" rx="3" fill="#1a1a28" stroke="#2a2a42"/>
+      <text x="22" y="30"  text-anchor="middle" fill="#7b8fff" font-size="10" font-weight="700">V</text>
+      <text x="22" y="46"  text-anchor="middle" fill="#8891b8" font-size="10">A</text>
+      <text x="22" y="62"  text-anchor="middle" fill="#8891b8" font-size="10">W</text>
+      <text x="22" y="78"  text-anchor="middle" fill="#8891b8" font-size="10">E</text>
+      <text x="22" y="94"  text-anchor="middle" fill="#8891b8" font-size="10">S</text>
+      <text x="22" y="110" text-anchor="middle" fill="#8891b8" font-size="10">P</text>
+      <text x="22" y="126" text-anchor="middle" fill="#8891b8" font-size="10">L</text>
+      <text x="22" y="142" text-anchor="middle" fill="#8891b8" font-size="10">C</text>
+      <text x="22" y="158" text-anchor="middle" fill="#8891b8" font-size="10">R</text>
+      <!-- canvas area -->
+      <rect x="40" y="10" width="360" height="130" rx="3" fill="#0a0a12" stroke="#2a2a42"/>
+      <text x="220" y="28" text-anchor="middle" fill="#2a2a42" font-size="10">CANVAS  (-1 .. +1 coordinate space)</text>
+      <!-- grid lines -->
+      <line x1="220" y1="14" x2="220" y2="136" stroke="#1c1c2e" stroke-dasharray="3,4"/>
+      <line x1="44"  y1="75" x2="396" y2="75"  stroke="#1c1c2e" stroke-dasharray="3,4"/>
+      <!-- sample drawing -->
+      <path d="M80,95 C130,40 300,40 350,95" stroke="#5c6ef8" stroke-width="2" fill="none"/>
+      <circle cx="80"  cy="95" r="3" fill="#5c6ef8"/>
+      <circle cx="350" cy="95" r="3" fill="#5c6ef8"/>
+      <path d="M130,60 L160,40" stroke="#5c6ef8" stroke-width="1" stroke-dasharray="3,2" opacity="0.5"/>
+      <path d="M300,40 L330,60" stroke="#5c6ef8" stroke-width="1" stroke-dasharray="3,2" opacity="0.5"/>
+      <!-- onion ghost -->
+      <path d="M85,100 C135,45 305,45 355,100" stroke="#fbbf24" stroke-width="1" fill="none" opacity="0.25"/>
+      <!-- timeline strip -->
+      <rect x="40" y="144" width="360" height="26" fill="#0d0d16" stroke="#2a2a42"/>
+      <rect x="40" y="144" width="90" height="26" fill="#1a1a28" stroke="#2a2a42"/>
+      <text x="85" y="161" text-anchor="middle" fill="#10b981" font-size="9">● 0.0s</text>
+      <rect x="178" y="144" width="2" height="26" fill="#fbbf24"/>
+      <text x="180" y="161" fill="#fbbf24" font-size="9"> 1.8s</text>
+      <!-- properties sidebar -->
+      <rect x="408" y="10" width="162" height="160" rx="3" fill="#101018" stroke="#2a2a42"/>
+      <text x="489" y="26" text-anchor="middle" fill="#5c6ef8" font-size="10" font-weight="700">PROPERTIES</text>
+      <text x="416" y="44" fill="#8891b8" font-size="9">Color</text>
+      <rect x="416" y="48" width="60" height="14" rx="2" fill="#00e5ff" opacity="0.8"/>
+      <text x="416" y="78" fill="#8891b8" font-size="9">Thickness  1.0</text>
+      <rect x="416" y="82" width="140" height="6" rx="3" fill="#2a2a42"/>
+      <rect x="416" y="82" width="40" height="6" rx="3" fill="#5c6ef8"/>
+      <text x="416" y="104" fill="#8891b8" font-size="9">Dwell  2</text>
+      <text x="416" y="120" fill="#8891b8" font-size="9">Density  0.50</text>
+      <text x="416" y="140" fill="#8891b8" font-size="9">Symmetry</text>
+      <rect x="416" y="144" width="56" height="16" rx="2" fill="#2a2a42"/>
+      <text x="444" y="155" text-anchor="middle" fill="#dde1ff" font-size="8">None</text>
+    </svg>
+    <p class="diagram-caption">Figure 2.2 — Frame Editor: tool palette (left), canvas (center), properties (right), keyframe timeline (bottom)</p>
+  </div>
+
+  <h2 class="subsection">Playback Strip (Detail)</h2>
+
+  <div class="diagram-wrap">
+    <svg viewBox="0 0 500 110" width="500" height="110" xmlns="http://www.w3.org/2000/svg" style="max-width:100%;font-family:system-ui,sans-serif;">
+      <rect width="500" height="110" rx="6" fill="#0d0d16" stroke="#fbbf24" stroke-width="1.5"/>
+      <!-- one playback slot detailed -->
+      <rect x="10" y="10" width="110" height="90" rx="4" fill="#1a1a28" stroke="#5c6ef8" stroke-width="1.5"/>
+      <text x="65" y="26" text-anchor="middle" fill="#dde1ff" font-size="10" font-weight="600">Playback 1</text>
+      <text x="65" y="38" text-anchor="middle" fill="#10b981" font-size="9">● Lissajous</text>
+      <!-- GO STOP CLR BLIND buttons -->
+      <rect x="14" y="44" width="24" height="16" rx="2" fill="#10b981"/>
+      <text x="26" y="56" text-anchor="middle" fill="#000" font-size="9" font-weight="700">GO</text>
+      <rect x="41" y="44" width="24" height="16" rx="2" fill="#1a1a28" stroke="#f43f5e"/>
+      <text x="53" y="56" text-anchor="middle" fill="#f43f5e" font-size="8">STP</text>
+      <rect x="68" y="44" width="24" height="16" rx="2" fill="#1a1a28" stroke="#8891b8"/>
+      <text x="80" y="56" text-anchor="middle" fill="#8891b8" font-size="8">CLR</text>
+      <rect x="95" y="44" width="21" height="16" rx="2" fill="#1a1a28" stroke="#fbbf24"/>
+      <text x="105" y="56" text-anchor="middle" fill="#fbbf24" font-size="8">BLD</text>
+      <!-- intensity fader -->
+      <rect x="14" y="66" width="102" height="8" rx="4" fill="#0d0d12" stroke="#2a2a42"/>
+      <rect x="14" y="66" width="78" height="8" rx="4" fill="#5c6ef8" opacity="0.8"/>
+      <circle cx="92" cy="70" r="6" fill="#7b8fff" stroke="#dde1ff" stroke-width="1"/>
+      <text x="65" y="92" text-anchor="middle" fill="#8891b8" font-size="9">Intensity 76%</text>
+
+      <!-- simplified other slots -->
+      <g opacity="0.5">
+        <rect x="128" y="10" width="70" height="90" rx="4" fill="#1a1a28" stroke="#2a2a42"/>
+        <text x="163" y="30" text-anchor="middle" fill="#8891b8" font-size="9">PB 2</text>
+        <rect x="206" y="10" width="70" height="90" rx="4" fill="#1a1a28" stroke="#2a2a42"/>
+        <text x="241" y="30" text-anchor="middle" fill="#8891b8" font-size="9">PB 3</text>
+        <rect x="284" y="10" width="70" height="90" rx="4" fill="#1a1a28" stroke="#2a2a42"/>
+        <text x="319" y="30" text-anchor="middle" fill="#8891b8" font-size="9">PB 4</text>
+        <rect x="362" y="10" width="70" height="90" rx="4" fill="#1a1a28" stroke="#2a2a42"/>
+        <text x="397" y="30" text-anchor="middle" fill="#8891b8" font-size="9">PB 5</text>
+        <text x="320" y="60" text-anchor="middle" fill="#8891b8" font-size="10">· · · (10 total) · · ·</text>
+      </g>
+    </svg>
+    <p class="diagram-caption">Figure 2.3 — One playback slot showing GO, STOP, CLR, BLIND, and intensity fader</p>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ SECTION 3 ═══════ -->
+<section class="section" id="s3">
+  <h1 class="section-title"><span class="sec-num">§ 3</span>Cue System</h1>
+
+  <h2 class="subsection">What Is a Cue?</h2>
+  <p>A <strong>cue</strong> is a named, self-contained state for the laser system. It defines what color(s) to project, what pattern or shape to draw, where to aim the beam, and how bright to make it. When a cue is activated (by pressing GO on a playback), the engine blends the laser output toward that cue's values over the specified fade time.</p>
+  <p>Cues are stored in the <strong>Cue Library</strong> and can be assigned to any of the 10 playback stacks. The same cue can appear in multiple playbacks simultaneously.</p>
+
+  <h2 class="subsection">Cue Types</h2>
+
+  <h3 class="sub3">Generator Cues</h3>
+  <p>A generator cue uses one of the built-in mathematical pattern generators (Lissajous, Spiral, Thunderbolt, Vortex, Sierpinski, etc.) to produce an animated laser pattern from parameters. Generator cues are infinitely looping and require no manual keyframe animation — just set parameters like <em>Speed</em>, <em>Scale</em>, and <em>Color</em> and the engine does the rest. See <a href="#s6">Section 6</a> for a complete list.</p>
+
+  <h3 class="sub3">Frame / Keyframe Cues</h3>
+  <p>A keyframe cue contains drawn objects (lines, bezier curves, circles, text, etc.) arranged on a timeline. If the cue has only one frame (no animation), it displays a static shape. If it has multiple keyframes, the engine interpolates the objects over time to create smooth animated sequences. Objects with matching IDs morph between frames; objects that appear or disappear fade in and out.</p>
+
+  <h3 class="sub3">Chaser Cues</h3>
+  <p>A chaser cue is a <em>step sequencer</em> — it cycles through a list of other cues automatically. Each step can have its own hold time and crossfade duration. Chasers can also synchronize to the engine BPM (beat-sync mode) to ensure steps change on-beat at any tempo.</p>
+  <p>A chaser is created via the Cue Library's <em>New Chaser</em> button. Each step references an existing cue by index. Steps can also override the chaser's global hold/xfade times individually.</p>
+
+  <h2 class="subsection">The 3 Layers of Every Cue</h2>
+  <p>Every cue — regardless of type — is structured as three independent layers that combine at render time:</p>
+
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>Layer</th><th>Controls</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Global</td>
+        <td>Strobe rate, strobe duty, global dim</td>
+        <td>Master intensity and strobe parameters that affect the entire cue uniformly. <code>strobe_rate</code> is in Hz (0 = off). <code>global_dim</code> scales all output brightness for this cue independently of the master fader.</td>
+      </tr>
+      <tr>
+        <td>FX</td>
+        <td>Movement effects, color effects, custom DSP blocks</td>
+        <td>An additive stack of effect blocks (pan, tilt oscillators, color rotation, blur, scatter, etc.). FX blocks can be enabled, bypassed, or have a wet/dry mix applied. They run independently of the content layer and can be freely adjusted without touching the keyframe data.</td>
+      </tr>
+      <tr>
+        <td>Keyframe</td>
+        <td>Drawn objects (lines, curves, shapes, text)</td>
+        <td>The actual visual content: a list of <code>LaserObject</code> instances at their current interpolated positions. Objects are rendered to a point buffer and passed through the FX stack and Global layer before output.</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 class="subsection">Cue Timing</h2>
+  <p>Each cue entry in a playback stack carries a full timing block with these parameters:</p>
+  <ul>
+    <li><strong>Fade In</strong> — seconds from activation to full intensity. <code>0</code> = snap (instant).</li>
+    <li><strong>Delay In</strong> — seconds to wait before starting the fade in.</li>
+    <li><strong>Hold</strong> — seconds to remain at full intensity before auto-advance. <code>0</code> = no hold (follows trigger immediately).</li>
+    <li><strong>Fade Out</strong> — seconds from deactivation to zero intensity.</li>
+    <li><strong>Wait</strong> — seconds after the hold completes before auto-advancing to the next cue. <code>0</code> = HALT (manual GO required).</li>
+    <li><strong>Path / Curve</strong> — the fade curve shape. Options: Linear, SCurve, EaseIn, EaseOut, EaseInOut, SnapLate, SnapEarly, Expression.</li>
+  </ul>
+
+  <h2 class="subsection">Cue Triggers</h2>
+  <p>What causes a cue to advance? The <code>TriggerType</code> controls this:</p>
+  <ul>
+    <li><strong>Halt</strong> — manual GO button press required.</li>
+    <li><strong>Follow</strong> — auto-advance after a set number of seconds from cue activation.</li>
+    <li><strong>Wait</strong> — auto-advance after the cue's hold time completes.</li>
+    <li><strong>Timecode</strong> — advance at a specific LTC/MTC/ArtNet TC frame number.</li>
+    <li><strong>MIDI</strong> — advance on a MIDI note or CC message.</li>
+    <li><strong>OSC</strong> — advance on an incoming OSC message to a specified address.</li>
+    <li><strong>DMX</strong> — advance when a DMX channel exceeds a threshold.</li>
+    <li><strong>Audio</strong> — advance on a beat, onset, or audio threshold event.</li>
+  </ul>
+
+  <h2 class="subsection">Cue Library</h2>
+  <p>The Cue Library panel (accessible from the View menu) displays all cues in the current project as a scrollable grid. Each cue card shows its name, generator type or preview thumbnail, and color tag.</p>
+  <ul>
+    <li><strong>Search:</strong> A search box at the top filters cues by name in real time.</li>
+    <li><strong>Duplicate:</strong> Right-click a cue and choose <em>Duplicate</em> to create an independent copy.</li>
+    <li><strong>Delete:</strong> Right-click → <em>Delete</em>. Cues referenced by active playbacks are not removed from output immediately — the playback finishes its current fade first.</li>
+    <li><strong>Rename:</strong> Double-click a cue card name to edit it inline.</li>
+    <li><strong>Properties:</strong> Click a cue card to expand its timing, trigger, and layer settings in the Inspector panel.</li>
+  </ul>
+
+  <h2 class="subsection">Cue Numbers (MagicQ-style)</h2>
+  <p>Each cue in a playback has a decimal cue number (e.g., <code>1.0</code>, <code>1.5</code>, <code>2.0</code>). The major number identifies the cue position; the minor number allows inserting sub-cues (<code>1.5</code> sits between <code>1.0</code> and <code>2.0</code>) without renumbering the entire stack. Jump commands use the <code>major.minor</code> format.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ SECTION 4 ═══════ -->
+<section class="section" id="s4">
+  <h1 class="section-title"><span class="sec-num">§ 4</span>Frame / Keyframe Editor</h1>
+
+  <h2 class="subsection">Opening the Editor</h2>
+  <p>The Frame Editor is the default primary panel when IDHMFIS starts. It occupies the large left area of the main window. If you have closed it, re-open it via <strong>View → Frame Editor</strong>. The editor operates in the coordinate space <code>-1.0</code> (left/bottom) to <code>+1.0</code> (right/top), matching the laser output coordinate system.</p>
+
+  <h2 class="subsection">Layer Tabs</h2>
+  <p>Three tabs at the top of the editor switch the active editing layer:</p>
+  <ul>
+    <li><strong>Global</strong> — set strobe rate (Hz), strobe duty cycle (0–1), and per-cue global dim. Changes here affect the entire cue uniformly.</li>
+    <li><strong>FX</strong> — add and configure effect blocks from the FX library. Each block has an enable toggle, a bypass toggle, a wet/dry mix, and its own parameter sliders.</li>
+    <li><strong>Keyframe</strong> — the main drawing canvas. All drawing tools work here.</li>
+  </ul>
+
+  <h2 class="subsection">Tool Palette</h2>
+  <p>The vertical toolbar on the left edge of the canvas contains all drawing and selection tools. Click a tool icon or press its keyboard shortcut to activate it.</p>
+
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th style="width:48px">Icon</th><th>Tool</th><th>Shortcut</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="tool-icon">V</td><td>Select</td><td><kbd>V</kbd></td><td>Click to select objects. Drag a box to rubber-band select multiple. Drag a selected object to move it.</td></tr>
+      <tr><td class="tool-icon">A</td><td>Node Edit</td><td><kbd>A</kbd></td><td>After selecting an object, edit its individual control points. Drag any point to reshape the object.</td></tr>
+      <tr><td class="tool-icon">W</td><td>Move</td><td><kbd>W</kbd></td><td>Translate selected objects. Hold <kbd>X</kbd> to constrain movement to the horizontal axis; hold <kbd>Y</kbd> to constrain to vertical.</td></tr>
+      <tr><td class="tool-icon">E</td><td>Rotate</td><td><kbd>E</kbd></td><td>Rotate selected objects around the pivot point. Hold <kbd>Shift</kbd> to snap rotation to 15° increments.</td></tr>
+      <tr><td class="tool-icon">S</td><td>Scale</td><td><kbd>S</kbd></td><td>Scale selected objects from the pivot. Hold <kbd>Shift</kbd> for uniform scaling.</td></tr>
+      <tr><td class="tool-icon">Y</td><td>Pivot</td><td><kbd>Y</kbd></td><td>Reposition the transform pivot point without moving any objects. The pivot is shared by Rotate, Scale, and Symmetry.</td></tr>
+      <tr><td class="tool-icon">P</td><td>Pen</td><td><kbd>P</kbd></td><td>Draw Bezier curves. Each click places a node; drag while clicking to set tangent handles. Double-click to end the path.</td></tr>
+      <tr><td class="tool-icon">—</td><td>Line</td><td><kbd>L</kbd></td><td>Draw straight polyline segments. Each click adds a point; double-click to end. Hold <kbd>Shift</kbd> to constrain to 45° increments.</td></tr>
+      <tr><td class="tool-icon">○</td><td>Circle</td><td><kbd>C</kbd></td><td>Click and drag to define a circle. Hold <kbd>Shift</kbd> for a perfect circle (locks aspect ratio).</td></tr>
+      <tr><td class="tool-icon">□</td><td>Rectangle</td><td><kbd>R</kbd></td><td>Click and drag to define a rectangle. Hold <kbd>Shift</kbd> for a square.</td></tr>
+      <tr><td class="tool-icon">⌒</td><td>Arc</td><td><kbd>A</kbd></td><td>Three-click tool: first click sets the center, second sets the radius and start angle, third sets the end angle.</td></tr>
+      <tr><td class="tool-icon">⬡</td><td>Polygon</td><td><kbd>G</kbd></td><td>Draw a regular polygon. Adjust the number of sides in the Properties panel (default 6). Click and drag to place.</td></tr>
+      <tr><td class="tool-icon">★</td><td>Star</td><td>—</td><td>Draw a star polygon. Adjust sides and inner radius ratio in Properties. Click and drag to place.</td></tr>
+      <tr><td class="tool-icon">•</td><td>Dot</td><td><kbd>D</kbd></td><td>Place a single dwell point (rendered as a bright spot). Useful for marking corners or creating dot patterns.</td></tr>
+      <tr><td class="tool-icon">T</td><td>Text</td><td><kbd>T</kbd></td><td>Click the canvas to open a text input popup. Type your message, press Enter. Text is rendered using a laser-optimized stroke font.</td></tr>
+      <tr><td class="tool-icon">⊕</td><td>Lasso</td><td>—</td><td>Draw a freehand polygon. Objects whose center falls inside the polygon are selected when you close the loop.</td></tr>
+      <tr><td class="tool-icon">👁</td><td>Onion Skin</td><td><kbd>O</kbd></td><td>Toggle ghost frames. Shows semi-transparent copies of the previous and next keyframes to aid in animating between states. Onion opacity is configurable in Properties.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 class="subsection">Object Properties</h2>
+  <p>When one or more objects are selected, the Properties panel (right side of the canvas) shows editable fields:</p>
+  <ul>
+    <li><strong>Color</strong> — RGB color swatch. Click to open a color picker.</li>
+    <li><strong>Thickness</strong> — line stroke weight in pixel units (1.0 default). Higher values produce a brighter, wider beam.</li>
+    <li><strong>Size</strong> — radius for circular objects and dot dwell points (normalized canvas units).</li>
+    <li><strong>Dwell</strong> — number of extra dwell (repeated) points inserted at vertices and endpoints. Increasing dwell makes corners brighter and helps prevent galvo overshoot artifacts.</li>
+    <li><strong>Density</strong> — number of interpolated points per unit length along the object's path. Higher density produces smoother curves at the cost of more points in the output buffer.</li>
+  </ul>
+
+  <h2 class="subsection">Symmetry Modes</h2>
+  <p>The Symmetry selector in the Properties panel applies a live mirror or radial copy to every drawing stroke in real time:</p>
+  <ul>
+    <li><strong>None</strong> — no symmetry (default).</li>
+    <li><strong>Mirror X</strong> — bilateral mirror across the vertical axis.</li>
+    <li><strong>Mirror Y</strong> — bilateral mirror across the horizontal axis.</li>
+    <li><strong>Mirror XY</strong> — 4-fold mirror (both axes simultaneously).</li>
+    <li><strong>Radial 2/3/4/6/8/12</strong> — rotational n-fold symmetry around the pivot point. Drawing one element replicates it n times evenly around the pivot.</li>
+  </ul>
+  <p>The symmetry pivot defaults to the canvas center (0, 0) and can be moved with the Pivot tool (<kbd>Y</kbd>).</p>
+
+  <h2 class="subsection">Keyframe Animation Timeline</h2>
+  <p>The timeline strip at the bottom of the Frame Editor shows all animation frames for the current cue. The total duration defaults to 4 seconds but can be resized by dragging the right edge of the timeline.</p>
+  <ul>
+    <li><strong>Adding a frame:</strong> Position the playhead (drag the yellow marker) to the desired time and click <em>Add Frame</em>. The editor takes a snapshot of the current objects as a keyframe at that time.</li>
+    <li><strong>Selecting a frame:</strong> Click a frame diamond in the timeline to jump to and edit that state.</li>
+    <li><strong>Deleting a frame:</strong> Right-click a frame diamond → <em>Delete Frame</em>.</li>
+    <li><strong>Drag playhead:</strong> Click and drag the yellow playhead marker to scrub through the animation in real time.</li>
+    <li><strong>Play/Stop:</strong> The transport buttons above the timeline play the animation in a loop.</li>
+  </ul>
+
+  <h3 class="sub3">Interpolation Types</h3>
+  <p>Each keyframe can have its own interpolation type that controls how the engine blends from that frame to the next:</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Type</th><th>Behavior</th></tr></thead>
+    <tbody>
+      <tr><td>Linear</td><td>Constant-speed blend between frames. Simple and predictable.</td></tr>
+      <tr><td>Ease In/Out</td><td>Starts slow, accelerates through the middle, decelerates at the end. Produces natural-looking motion (default).</td></tr>
+      <tr><td>Bezier</td><td>User-defined curve with adjustable tangent handles in the value graph view. Maximum control.</td></tr>
+      <tr><td>Hold / Step</td><td>Objects snap instantly to the next keyframe values with no interpolation. Good for strobe-style or mechanical effects.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 class="subsection">Exporting to a Cue (Record KF)</h2>
+  <p>When you are happy with the content in the Frame Editor, click <strong>Record KF</strong> (or the record button in the Transport bar while Record Mode is active). A dialog appears:</p>
+  <ol>
+    <li>Type a name for the cue.</li>
+    <li>Optionally set fade in and fade out times.</li>
+    <li>Press Enter or click OK.</li>
+  </ol>
+  <p>The new cue appears in the Cue Library and can be assigned to a playback.</p>
+  <div class="callout tip">
+    <strong>Tip:</strong> You can also use <em>Record Mode</em> (toggle in the Transport bar) to capture the current output state directly into the active playback as a new cue entry, including live FX and generator parameter adjustments.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ SECTION 5 ═══════ -->
+<section class="section" id="s5">
+  <h1 class="section-title"><span class="sec-num">§ 5</span>Multiple Playbacks (MagicQ-style)</h1>
+
+  <h2 class="subsection">What Is a Playback?</h2>
+  <p>A <strong>playback</strong> is an independent cue stack — an ordered list of cues — with its own intensity fader, go/stop controls, and active state. IDHMFIS provides <strong>10 playbacks</strong> that run simultaneously and whose outputs are merged (highest intensity wins, using LTP tracking) before reaching the laser output.</p>
+  <p>This model mirrors the MagicQ and MA lighting desk workflow: each playback behaves like a fader on a physical lighting console. You can run a background ambient loop on playback 1, a beam chase on playback 2, a strobe hit on playback 3, and so on — all independently controllable during a live show.</p>
+
+  <h2 class="subsection">The 10 Playback Strip</h2>
+  <p>The playback strip is permanently anchored at the bottom of the main window and is always visible, even when other panels are open. Each of the 10 slots displays:</p>
+  <ul>
+    <li>The playback name (editable by double-clicking).</li>
+    <li>The name of the currently active cue (green when active, grey when idle).</li>
+    <li>Four control buttons: GO, STOP, CLR, BLIND.</li>
+    <li>An intensity fader.</li>
+  </ul>
+
+  <h2 class="subsection">GO Button</h2>
+  <p>Pressing <strong>GO</strong> on an inactive playback activates it and begins fading in its first cue (or the cue it last stopped on). On an already-active playback, GO advances to the next cue in the stack (equivalent to Ctrl+G from the keyboard when that playback has focus).</p>
+
+  <h2 class="subsection">STOP Button</h2>
+  <p>Pressing <strong>STOP</strong> deactivates the playback, fading out the current cue over its programmed fade-out time. The playback retains its current position in the cue stack — pressing GO again will resume from that point.</p>
+
+  <h2 class="subsection">CLEAR Button</h2>
+  <p>Pressing <strong>CLR</strong> (Clear) resets the playback to the beginning of its cue stack (cue position 1.0) and deactivates it. The output fades out immediately. Use this to return a playback to a known starting state between songs or scenes.</p>
+
+  <h2 class="subsection">BLIND Button</h2>
+  <p><strong>BLIND</strong> mode puts the playback into an edit-without-output state. When BLIND is active (the button turns yellow), you can advance through cues, adjust parameters, and program new content without affecting the live laser output. Toggle BLIND off to snap the playback's state to the live output.</p>
+  <div class="callout warn">
+    <strong>Note:</strong> BLIND mode does not prevent the playback from contributing to the merged output if it was already active. It only prevents <em>new</em> GO commands from affecting the live output while BLIND is on.
+  </div>
+
+  <h2 class="subsection">Intensity Fader</h2>
+  <p>The horizontal fader below the buttons controls the overall brightness of all cues on this playback from 0% to 100%. This is independent of the global Master Intensity in the Transport bar. The effective brightness of each laser point is: <code>point brightness × playback intensity × master intensity</code>.</p>
+
+  <h2 class="subsection">DMX Triggering</h2>
+  <p>Each playback can be mapped to a DMX channel so that an external lighting desk or DMX controller can trigger GO/STOP and control intensity:</p>
+  <ol>
+    <li>Open the Setup window (<strong>File → Setup...</strong>).</li>
+    <li>Go to the <strong>Network</strong> tab.</li>
+    <li>In the Playback DMX section, assign a universe, channel, and threshold level to the playback.</li>
+  </ol>
+  <p>When the assigned DMX channel exceeds the threshold, the playback fires GO. When it falls below, STOP is triggered. The channel value (0–255) is also scaled to the intensity fader.</p>
+
+  <h2 class="subsection">Adding Cues to a Playback</h2>
+  <p>To build a cue stack on a playback:</p>
+  <ol>
+    <li>Right-click the playback slot in the strip and choose <em>Open Cue Stack Editor</em>.</li>
+    <li>Drag cues from the Cue Library into the list.</li>
+    <li>Reorder by dragging. Set per-cue timing by clicking the timing cells in the list.</li>
+    <li>Close the editor — changes take effect immediately.</li>
+  </ol>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ SECTION 6 ═══════ -->
+<section class="section" id="s6">
+  <h1 class="section-title"><span class="sec-num">§ 6</span>Generator Cues</h1>
+
+  <h2 class="subsection">How Generators Work</h2>
+  <p>Generators are pure mathematical functions: given a set of <strong>parameters</strong> and a <strong>time value t</strong> (seconds since engine start), they return a complete point buffer for that frame. They have no internal mutable state — the same <code>(params, t)</code> inputs always produce identical output. This makes them perfectly reproducible, safe to run on any thread, and trivial to synchronize across multiple machines.</p>
+  <p>To use a generator cue, create a new cue and select a generator type from the dropdown in the Inspector. The Inspector then shows that generator's specific parameter sliders.</p>
+
+  <h2 class="subsection">Full Generator List</h2>
+
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>Generator</th><th>Category</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Beams</td><td>Classic</td><td>Multiple straight beam shots radiating from a center or crossing point. Classic concert beam effect.</td></tr>
+      <tr><td>Waves</td><td>Classic</td><td>Oscillating sine-wave pattern. Controls for frequency, amplitude, phase, and number of waves.</td></tr>
+      <tr><td>Lissajous</td><td>Mathematical</td><td>Parametric Lissajous figure: two sinusoids of different frequencies on X and Y axes. The frequency ratio determines the figure shape. Phase controls rotation.</td></tr>
+      <tr><td>Tunnel</td><td>3D</td><td>Concentric rings that recede into a vanishing point, creating a tunnel / wormhole perspective effect.</td></tr>
+      <tr><td>Text</td><td>Utility</td><td>Renders a user-supplied string using a laser stroke font. Set the text content, size, and scroll speed in parameters.</td></tr>
+      <tr><td>Oscilloscope</td><td>Audio-reactive</td><td>Displays the real-time audio waveform as a line, styled like a classic oscilloscope. Reacts to the audio input feed.</td></tr>
+      <tr><td>FFT Bars</td><td>Audio-reactive</td><td>Frequency spectrum analyzer displayed as vertical bars. Bar count, scale, and color are adjustable. Reacts to the audio FFT.</td></tr>
+      <tr><td>Spirograph</td><td>Mathematical</td><td>Epitrochoid / hypotrochoid spirograph figure (the pattern made by a pen inside a rolling gear). Adjustable inner/outer radius ratio.</td></tr>
+      <tr><td>Particles</td><td>Simulation</td><td>Point particles emitted from a configurable emitter, affected by gravity and drag. Creates spray, fountain, and explosion effects.</td></tr>
+      <tr><td>Geomorph</td><td>Abstract</td><td>Smoothly morphing geometric shapes driven by low-frequency oscillators. Never repeats exactly.</td></tr>
+      <tr><td>Ribbon</td><td>Abstract</td><td>A twisting, flowing ribbon traced through 3D space and projected flat. Adjustable twist rate and width.</td></tr>
+      <tr><td>Grid</td><td>Geometric</td><td>Rectangular or polar grid pattern. Adjustable rows, columns, and grid rotation.</td></tr>
+      <tr><td>Starburst</td><td>Classic</td><td>Radial lines emanating from a center point, rotating over time. Adjustable ray count and rotation speed.</td></tr>
+      <tr><td>Fan Sweep</td><td>Classic</td><td>A single beam or group of beams sweeping back and forth in a fan arc. Classic concert sweeper.</td></tr>
+      <tr><td>Cone Sweep</td><td>Classic</td><td>Beams sweeping in a cone pattern. Creates the classic aerial cone effect.</td></tr>
+      <tr><td>ILDA Sequence</td><td>Utility</td><td>Plays back a loaded ILDA file (binary .ild format). Supports loop, hold, and speed control.</td></tr>
+      <tr><td>Circle</td><td>Quick Shape</td><td>Simple animated circle. Adjustable radius, phase, and point count.</td></tr>
+      <tr><td>Rectangle</td><td>Quick Shape</td><td>Simple animated rectangle. Adjustable width, height, and corner rounding.</td></tr>
+      <tr><td>Triangle</td><td>Quick Shape</td><td>Equilateral or scalene triangle with rotation and scale animation.</td></tr>
+      <tr><td>Star</td><td>Quick Shape</td><td>Star polygon with adjustable point count and inner radius. Rotates over time.</td></tr>
+      <tr><td>Polygon</td><td>Quick Shape</td><td>Regular polygon with adjustable side count and rotation speed.</td></tr>
+      <tr><td>Line</td><td>Quick Shape</td><td>Single line segment with animated endpoints.</td></tr>
+      <tr><td>Dot</td><td>Quick Shape</td><td>Single dwell point (circle) that can oscillate in position.</td></tr>
+      <tr><td>Spiral</td><td>Mathematical</td><td>Archimedean or logarithmic spiral, expanding or contracting over time. Adjustable arm count.</td></tr>
+      <tr><td>Sine Wave</td><td>Classic</td><td>Classic horizontal sine-wave scan. Adjustable frequency and amplitude.</td></tr>
+      <tr><td>Dot Matrix</td><td>Festival/EDM</td><td>Grid of points that pulse and ripple in response to BPM.</td></tr>
+      <tr><td>Burst</td><td>Festival/EDM</td><td>Rapid outward expansion of rays from center, synced to beat for impact moments.</td></tr>
+      <tr><td>Waterfall</td><td>Festival/EDM</td><td>Cascading curtain of downward-flowing lines. Great for drop moments.</td></tr>
+      <tr><td>Thunderbolt</td><td>High-Impact</td><td>Fractal branching lightning bolt, redrawn each frame with a new random seed. Adjustable branch depth, bolt width, and arc length.</td></tr>
+      <tr><td>Vortex</td><td>High-Impact</td><td>Spinning concentric tunnel rings that converge inward, creating a vortex / portal effect. Adjustable ring count and rotation speed.</td></tr>
+      <tr><td>Sierpinski</td><td>High-Impact</td><td>Chaos-game Sierpinski triangle attractor. Points accumulate into a fractal triangle over time, creating an organic growth animation.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 class="subsection">Common Parameters</h2>
+  <p>All generators share a set of global parameters available in the Inspector regardless of generator type:</p>
+  <ul>
+    <li><strong>Speed</strong> — animation playback speed multiplier. 1.0 = normal, 0.5 = half speed, 2.0 = double.</li>
+    <li><strong>Scale</strong> — overall size of the pattern (0.0–1.0, where 1.0 fills the output area).</li>
+    <li><strong>Density / Point Count</strong> — total number of output points. Higher values produce smoother output but require more DAC bandwidth.</li>
+    <li><strong>Color A / Color B</strong> — start and end colors for gradient-based generators. Many generators blend between A and B across their pattern.</li>
+    <li><strong>Rotation</strong> — static rotation offset applied to the entire output (degrees).</li>
+    <li><strong>Pan / Tilt</strong> — XY position offset for the entire pattern.</li>
+  </ul>
+
+  <h2 class="subsection">Generator-Specific Parameters</h2>
+  <p>Each generator exposes up to three additional sliders labeled <em>Param A</em>, <em>Param B</em>, and <em>Param C</em>. The Inspector shows the generator's custom labels for these (e.g., for Lissajous: <em>Freq X</em>, <em>Freq Y</em>, <em>Phase</em>). Hover over a slider to see its range and default value.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ SECTION 7 ═══════ -->
+<section class="section" id="s7">
+  <h1 class="section-title"><span class="sec-num">§ 7</span>NDI Output</h1>
+
+  <h2 class="subsection">What Is NDI?</h2>
+  <p><strong>NDI</strong> (Network Device Interface) is a royalty-free protocol developed by NewTek/Vizrt that transmits high-quality video streams over a standard Ethernet LAN. IDHMFIS uses NDI as its primary visual output channel: the laser output is rasterized into a glowing beam video frame and broadcast over your local network where any NDI-compatible receiver can display or capture it.</p>
+  <p>Common uses for NDI output from IDHMFIS:</p>
+  <ul>
+    <li>Monitoring the laser show on a laptop/tablet without physical laser hardware.</li>
+    <li>Feeding a video mixer or VJ software (Resolume, MadMapper, vMix, OBS) to composite laser visuals with other video.</li>
+    <li>Recording the show output as a video file using NDI Studio Monitor's recording feature.</li>
+    <li>Sending a reference feed to a front-of-house operator.</li>
+  </ul>
+
+  <h2 class="subsection">Setting Up NDI Output</h2>
+  <ol>
+    <li>Open the Setup window: <strong>File → Setup...</strong> (or click the gear icon in the Transport bar).</li>
+    <li>Click the <strong>NDI Output</strong> tab.</li>
+    <li>Set your <strong>Source Name</strong> — this is the name that appears in NDI receiver applications (default: <code>IDHMFIS</code>).</li>
+    <li>Choose the output <strong>Resolution</strong>: 480p (854×480), 720p (1280×720), or 1080p (1920×1080). Higher resolutions produce a more detailed preview but require more CPU and network bandwidth.</li>
+    <li>Set the output <strong>Frame Rate</strong> (30, 60 fps — default 60).</li>
+    <li>Ensure the <strong>Enable</strong> toggle is on.</li>
+    <li>Click <strong>Apply</strong>.</li>
+  </ol>
+  <p>The NDI status indicator in the Transport bar turns green when at least one receiver has connected.</p>
+
+  <h2 class="subsection">Connecting NDI Studio Monitor</h2>
+  <ol>
+    <li>Download and install <strong>NDI Tools</strong> (free) from <code>ndi.video</code>. This includes NDI Studio Monitor.</li>
+    <li>Launch NDI Studio Monitor on any computer on the same LAN.</li>
+    <li>Click the source selector drop-down and choose your IDHMFIS source (e.g., <code>IDHMFIS</code> or whatever you named it).</li>
+    <li>The laser show output appears in the Studio Monitor window in real time.</li>
+  </ol>
+  <div class="callout tip">
+    <strong>Tip:</strong> If the IDHMFIS source does not appear in the drop-down, check that your firewall allows UDP multicast traffic on port 5353 (used for NDI discovery) and that both machines are on the same subnet.
+  </div>
+
+  <h2 class="subsection">How the Rasterizer Works</h2>
+  <p>The laser output is a list of X/Y/RGB <em>points</em>, not a traditional video frame. IDHMFIS's built-in rasterizer converts these points into a glowing beam image by painting each point as a lit circle with a surrounding soft glow:</p>
+  <ol>
+    <li>The canvas is initialized to black (all zeros).</li>
+    <li>For each output point, a solid circle of radius <code>beam_radius</code> is painted in the point's color.</li>
+    <li>On top of that, a larger, softer Gaussian-blurred halo of radius <code>glow_radius</code> is painted at <code>glow_alpha</code> opacity.</li>
+    <li>The result is a physically plausible-looking laser beam glow on a dark background.</li>
+  </ol>
+
+  <h2 class="subsection">Beam and Glow Parameters Explained</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Parameter</th><th>Default</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td>Beam Radius</td><td>2.5 px</td><td>The hard-edged beam core radius in pixels (at the output resolution). Increase for a thicker, more visible beam. Decrease for a sharp, precise appearance.</td></tr>
+      <tr><td>Glow Radius</td><td>8.0 px</td><td>The radius of the soft outer glow halo. Larger values give a more diffuse, atmospheric look similar to smoke-hazed laser beams in a live venue.</td></tr>
+      <tr><td>Glow Alpha</td><td>0.25</td><td>The opacity of the glow layer (0.0–1.0). Increase for a brighter, more prominent glow; decrease for a clean minimal look.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>These parameters are found in the Setup window under <strong>Beam Params</strong>.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ SECTION 8 ═══════ -->
+<section class="section" id="s8">
+  <h1 class="section-title"><span class="sec-num">§ 8</span>Setup Window</h1>
+
+  <h2 class="subsection">Opening the Setup Window</h2>
+  <p>Open the Setup window by selecting <strong>File → Setup...</strong> from the menu bar, or by clicking the gear icon in the Transport bar. The window is non-blocking (you can keep it open while programming) and changes take effect when you click <strong>Apply</strong> or change focus out of the affected field.</p>
+
+  <h2 class="subsection">NDI Output Tab</h2>
+  <ul>
+    <li><strong>Enable</strong> — master toggle for NDI output. Turn off to save CPU when NDI monitoring is not needed.</li>
+    <li><strong>Source Name</strong> — the NDI sender name. This is what other applications see when scanning for NDI sources. Changing this requires a restart of the NDI sender (click Apply).</li>
+    <li><strong>Resolution</strong> — output video resolution: 480p / 720p / 1080p.</li>
+    <li><strong>FPS</strong> — output frame rate. 60 fps is recommended for smooth laser motion preview.</li>
+  </ul>
+
+  <h2 class="subsection">Network Tab</h2>
+  <ul>
+    <li><strong>OSC Port</strong> — UDP port number for incoming OSC messages (default 9000). Change this if port 9000 conflicts with another application. A restart is required for port changes.</li>
+    <li><strong>ArtNet Output IP</strong> — the destination IP address for ArtNet DMX output. Use the broadcast address of your subnet (e.g., <code>192.168.1.255</code>) to reach all Art-Net nodes, or a specific fixture IP for targeted output.</li>
+    <li><strong>ArtNet Enable</strong> — enables ArtNet DMX transmission. Requires a valid destination IP.</li>
+    <li><strong>ArtNet Universe Offset</strong> — adds an offset to all outgoing ArtNet universe numbers. Use this if your rig already uses universes 0–3 for other purposes.</li>
+  </ul>
+
+  <h2 class="subsection">Beam Params Tab</h2>
+  <ul>
+    <li><strong>Beam Thickness</strong> — the hard-core radius of each rendered beam point in the NDI output (in pixels). See Section 7 for detail.</li>
+    <li><strong>Glow Radius</strong> — the outer soft glow halo radius.</li>
+    <li><strong>Glow Alpha</strong> — the opacity of the glow layer.</li>
+  </ul>
+  <p>A live preview in the Setup window shows the effect of these parameters on a test point immediately.</p>
+
+  <h2 class="subsection">About Tab</h2>
+  <ul>
+    <li>Software version: <strong>1.00</strong></li>
+    <li>Build date: May 2026</li>
+    <li>Credits and third-party library attributions.</li>
+    <li>Link to documentation.</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ SECTION 9 ═══════ -->
+<section class="section" id="s9">
+  <h1 class="section-title"><span class="sec-num">§ 9</span>MIDI Learn</h1>
+
+  <h2 class="subsection">Opening the MIDI Learn Panel</h2>
+  <p>Open the MIDI Learn panel via <strong>View → MIDI Learn</strong>. The panel shows a table of all current MIDI bindings and allows you to create new ones interactively.</p>
+
+  <h2 class="subsection">Arming a Control for Learn</h2>
+  <ol>
+    <li>In the MIDI Learn panel, click <strong>Learn</strong> next to the engine target you want to map (e.g., <em>Master Intensity</em>, <em>BPM</em>, or a specific playback fader).</li>
+    <li>The row highlights in yellow, indicating it is armed and waiting for MIDI input.</li>
+    <li>Move the physical fader or turn the knob on your MIDI controller.</li>
+    <li>IDHMFIS detects the incoming CC (Control Change) message and records the channel and CC number. The row turns green to confirm the binding.</li>
+  </ol>
+
+  <h2 class="subsection">Bindable Engine Targets</h2>
+  <p>MIDI CC messages can be bound to the following engine parameters:</p>
+  <ul>
+    <li><strong>Master Intensity</strong> — global output brightness.</li>
+    <li><strong>BPM</strong> — live tempo control.</li>
+    <li><strong>Cue Select</strong> — selects a cue by CC value (CC value maps to cue index).</li>
+    <li><strong>Playback 1–10 Intensity</strong> — individual playback fader levels.</li>
+    <li><strong>Playback 1–10 GO</strong> — triggers GO on the specified playback (any non-zero CC value = GO).</li>
+    <li><strong>FX Wet</strong> — wet/dry mix for a specific FX block on the active cue.</li>
+    <li><strong>Generator Params</strong> — any active generator's Param A, B, or C sliders.</li>
+  </ul>
+
+  <h2 class="subsection">Clearing Bindings</h2>
+  <ul>
+    <li><strong>Remove a single binding:</strong> Click the <em>X</em> button in the binding's row.</li>
+    <li><strong>Clear all bindings:</strong> Click the <em>Clear All</em> button at the bottom of the MIDI Learn panel. This is confirmed with a dialog to prevent accidental clearing.</li>
+  </ul>
+
+  <h2 class="subsection">OSC Control</h2>
+  <p>IDHMFIS also accepts Open Sound Control (OSC) messages over UDP for remote control from lighting consoles, touch screens (TouchOSC), and other show control systems. Over 23 OSC routes are available, including:</p>
+  <ul>
+    <li><code>/go</code> — advance active playback.</li>
+    <li><code>/back</code> — go back one cue.</li>
+    <li><code>/jump &lt;major&gt; &lt;minor&gt;</code> — jump to a specific cue number.</li>
+    <li><code>/master &lt;0..1&gt;</code> — set master intensity.</li>
+    <li><code>/bam/enable &lt;0|1&gt;</code> — toggle BAM safety mask.</li>
+    <li><code>/quickshow &lt;page&gt; &lt;row&gt; &lt;col&gt;</code> — trigger a Quick Show slot.</li>
+    <li><code>/livepro/xy &lt;x&gt; &lt;y&gt;</code> — move LivePRO XY position.</li>
+  </ul>
+  <p>Configure the OSC listening port (default 9000) in the Setup window under the <strong>Network</strong> tab.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ SECTION 10 ══════ -->
+<section class="section" id="s10">
+  <h1 class="section-title"><span class="sec-num">§ 10</span>Auto-Save and Recovery</h1>
+
+  <h2 class="subsection">How Auto-Save Works</h2>
+  <p>IDHMFIS automatically saves a backup copy of your project every <strong>2 minutes</strong> whenever the project has unsaved changes. You do not need to configure anything — auto-save is always active.</p>
+  <p>The auto-save file is written to the same directory as your main project file with the extension <code>.autosave</code> appended (e.g., <code>MyShow.idhmfis.autosave</code>). If the project has never been saved (it is still "Untitled"), the auto-save file is written to the system's temporary directory.</p>
+
+  <h2 class="subsection">The Lock Sentinel</h2>
+  <p>When IDHMFIS starts, it creates a hidden lock file (<code>.autosave_lock</code>) alongside the project. This lock file is removed on a clean shutdown (normal exit). If IDHMFIS crashes or is force-killed while a project is open, the lock file is <em>not</em> cleaned up. On the next startup, IDHMFIS detects the stale lock file and knows that an auto-save from a crashed session exists.</p>
+
+  <h2 class="subsection">Recovery Dialog</h2>
+  <p>If IDHMFIS detects an unclean shutdown on startup, a recovery dialog appears with two options:</p>
+  <ul>
+    <li><strong>Restore</strong> — loads the auto-saved version of the project from the previous session. Any work done between the last manual save and the auto-save is recovered.</li>
+    <li><strong>Discard</strong> — discards the auto-save and opens the last manually saved version of the project (or a blank project if none exists).</li>
+  </ul>
+  <p>After choosing <em>Restore</em> or <em>Discard</em>, the lock sentinel is cleared and auto-save begins fresh for the new session.</p>
+
+  <h2 class="subsection">When Is Recovery Cleared?</h2>
+  <p>The recovery sentinel is cleared in two situations:</p>
+  <ol>
+    <li><strong>Clean shutdown</strong> — when you exit IDHMFIS normally via <strong>File → Exit</strong> or the window close button.</li>
+    <li><strong>Manual save</strong> — when you perform a manual save (<kbd>Ctrl+S</kbd>), the current state is written to the project file and the auto-save sentinel is refreshed.</li>
+  </ol>
+  <div class="callout tip">
+    <strong>Best Practice:</strong> Use <kbd>Ctrl+S</kbd> frequently during programming sessions. Auto-save is a safety net, not a substitute for regular manual saves.
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ SECTION 11 ══════ -->
+<section class="section" id="s11">
+  <h1 class="section-title"><span class="sec-num">§ 11</span>Keyboard Shortcuts</h1>
+
+  <p>The following shortcuts are active globally unless a text input field has focus. Drawing tool shortcuts are only active when the Frame Editor canvas has focus.</p>
+
+  <h2 class="subsection">Global / Project</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td>Ctrl+N</td><td>New Project</td></tr>
+      <tr><td>Ctrl+O</td><td>Open Project</td></tr>
+      <tr><td>Ctrl+S</td><td>Save Project</td></tr>
+      <tr><td>Ctrl+Shift+S</td><td>Save Project As...</td></tr>
+      <tr><td>Ctrl+Z</td><td>Undo</td></tr>
+      <tr><td>Ctrl+Y</td><td>Redo</td></tr>
+      <tr><td>Ctrl+K</td><td>Open Command Palette</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 class="subsection">Transport &amp; Playback</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td>Space</td><td>Play / Pause timeline</td></tr>
+      <tr><td>Ctrl+G</td><td>GO — advance active playback to next cue</td></tr>
+      <tr><td>Ctrl+B</td><td>GO Back — return to previous cue</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 class="subsection">Frame Editor Tools</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Shortcut</th><th>Tool / Action</th></tr></thead>
+    <tbody>
+      <tr><td>V</td><td>Select tool</td></tr>
+      <tr><td>A</td><td>Node Edit tool</td></tr>
+      <tr><td>W</td><td>Move tool</td></tr>
+      <tr><td>E</td><td>Rotate tool</td></tr>
+      <tr><td>S</td><td>Scale tool</td></tr>
+      <tr><td>Y</td><td>Pivot tool</td></tr>
+      <tr><td>P</td><td>Pen / Bezier tool</td></tr>
+      <tr><td>L</td><td>Line tool</td></tr>
+      <tr><td>C</td><td>Circle tool</td></tr>
+      <tr><td>R</td><td>Rectangle tool</td></tr>
+      <tr><td>G</td><td>Polygon tool</td></tr>
+      <tr><td>D</td><td>Dot tool</td></tr>
+      <tr><td>T</td><td>Text tool</td></tr>
+      <tr><td>O</td><td>Toggle Onion Skin</td></tr>
+      <tr><td>Delete</td><td>Delete selected objects</td></tr>
+      <tr><td>Ctrl+D</td><td>Duplicate selected objects</td></tr>
+      <tr><td>F</td><td>Fit canvas to view</td></tr>
+      <tr><td>Escape</td><td>Deselect all / Cancel current draw operation</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 class="subsection">Keyframe Timeline</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td>J</td><td>Jump to previous keyframe</td></tr>
+      <tr><td>K</td><td>Jump to next keyframe</td></tr>
+      <tr><td>F9</td><td>Apply Easy Ease (Ease In/Out) to selected keyframe</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 class="subsection">Modifier Keys (During Tool Operations)</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Modifier</th><th>Context</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td>Shift</td><td>Rotate tool</td><td>Snap rotation to 15° increments</td></tr>
+      <tr><td>Shift</td><td>Scale tool</td><td>Uniform scaling (lock aspect ratio)</td></tr>
+      <tr><td>Shift</td><td>Circle / Rect</td><td>Constrain to perfect circle / square</td></tr>
+      <tr><td>X</td><td>Move tool</td><td>Constrain movement to horizontal axis only</td></tr>
+      <tr><td>Y</td><td>Move tool</td><td>Constrain movement to vertical axis only</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════ SECTION 12 ══════ -->
+<section class="section" id="s12">
+  <h1 class="section-title"><span class="sec-num">§ 12</span>Changelog</h1>
+
+  <div class="changelog-block">
+    <div class="changelog-version">V1.1 — May 2026 — Core Workflow Fixes</div>
+
+    <div class="changelog-category">Critical Bug Fixes</div>
+    <ul class="changelog-items">
+      <li>Fixed recording: 40 playback slots are now pre-created on project load — REC button works immediately</li>
+      <li>Fixed programmer preview: laser preview now shows the actual composited output (programmer + active playbacks) instead of only the generator cue</li>
+      <li>Fixed programmer priority: programmer objects are always rendered above playback output (additive, highest layer)</li>
+      <li>Fixed playback GO/STOP/intensity — callbacks were not wired to the engine; now sends SetPlaybackCueGo / SetPlaybackStop / SetPlaybackIntensity commands</li>
+      <li>Fixed double-click to open cuestack: was silently failing because all playback IDs were -1</li>
+      <li>Fixed Ctrl+Z / Ctrl+Y undo/redo in frame editor with 50-step undo history</li>
+      <li>Fixed setup window blocking other panels: setup is now a floating window that stays above the normal docked layout instead of a full-screen takeover</li>
+      <li>Fixed recording command: recording now correctly passes the full FullCueEntry (with objects) in a single atomic command instead of a broken two-command sequence</li>
+      <li>Fixed cuestack editor availability in Show view: cuestack now opens from double-click in both Programmer and Show views</li>
+    </ul>
+
+    <div class="changelog-category">Improvements</div>
+    <ul class="changelog-items">
+      <li>Programmer sync now sends every render frame ensuring all object modifications (not just count changes) are immediately reflected in output</li>
+      <li>Playback GO advances to next cue and simultaneously activates the playback</li>
+      <li>Cuestack editor is now always accessible as a floating window regardless of active view</li>
+    </ul>
+  </div>
+
+  <div class="changelog-block">
+    <div class="changelog-version">V1.1 — May 2026 — Initial Release</div>
+
+    <div class="changelog-category">Core Engine</div>
+    <ul class="changelog-items">
+      <li>Show engine running at 1000 Hz with double-buffered snapshot for lock-free UI reads</li>
+      <li>MagicQ-style 10-playback cue system with independent cue stacks and intensity faders</li>
+      <li>3-layer cue model: Global (strobe/dim) / FX (effect stack) / Keyframe (drawn objects)</li>
+      <li>Chaser / step-sequence cue type with beat-sync support</li>
+      <li>Object-based keyframe animation with stable ID morphing across cues</li>
+      <li>Full MagicQ-class timing: fade_in, fade_out, delay_in, delay_out, hold, wait</li>
+      <li>CueNumber system with decimal sub-cue addressing (1.0, 1.5, 2.0...)</li>
+      <li>Engine watchdog thread — detects and logs engine stalls over 500 ms</li>
+    </ul>
+
+    <div class="changelog-category">Generators</div>
+    <ul class="changelog-items">
+      <li>35 built-in generators: Beams, Waves, Lissajous, Tunnel, Text, Oscilloscope, FFT Bars, Spirograph, Particles, Geomorph, Ribbon, Grid, Starburst, Fan Sweep, Cone Sweep, ILDA, Circle, Rect, Triangle, Star, Polygon, Line, Dot, Spiral, Sine Wave, Dot Matrix, Burst, Waterfall, Thunderbolt, Vortex, Sierpinski</li>
+      <li>Full color A/B gradient with density blending across all generators</li>
+      <li>Generator interface: pure-function design (params, t) for full reproducibility</li>
+    </ul>
+
+    <div class="changelog-category">Frame Editor</div>
+    <ul class="changelog-items">
+      <li>16-tool toolbar: Select, NodeEdit, Move, Rotate, Scale, Pivot, Pen, Line, Circle, Rect, Arc, Polygon, Star, Dot, Text, Lasso</li>
+      <li>Object-based editing with stable ID tracking for keyframe morphing</li>
+      <li>Keyframe animation timeline with drag-playhead and onion skin overlay</li>
+      <li>4 interpolation types: Linear, Ease In/Out, Bezier, Hold/Step</li>
+      <li>Symmetry modes: Mirror X, Mirror Y, Mirror XY, Radial 2/3/4/6/8/12</li>
+      <li>Per-object properties: color, thickness, size, dwell count, point density</li>
+      <li>Rotate tool: 15° snap with Shift; custom pivot support</li>
+      <li>Move tool: X/Y axis constraint with keyboard modifier</li>
+      <li>Lasso selection tool</li>
+    </ul>
+
+    <div class="changelog-category">Output</div>
+    <ul class="changelog-items">
+      <li>NDI software rasterizer with glow beam rendering (beam radius, glow radius, glow alpha)</li>
+      <li>NdiSender with dynamic DLL loader — works without NDI SDK installed</li>
+      <li>BGRA frame output at configurable resolution: 480p / 720p / 1080p</li>
+      <li>ArtNet DMX output with configurable destination IP and universe offset</li>
+      <li>DAC hot-plug registry with automatic reconnect</li>
+      <li>Zone routing: assign cue output to configurable spatial zones</li>
+      <li>BAM (Beam Area Masking) safety system with 64×64 cell grid</li>
+      <li>7-step point output optimizer (§B1)</li>
+    </ul>
+
+    <div class="changelog-category">MIDI / OSC</div>
+    <ul class="changelog-items">
+      <li>MIDI Learn with CC → engine target binding for all major parameters</li>
+      <li>23+ OSC routes: go, back, jump, master, fx, quickshow, livepro, bam</li>
+      <li>Timecode input: LTC / MTC / ArtNet TC for cue trigger synchronization</li>
+    </ul>
+
+    <div class="changelog-category">UI</div>
+    <ul class="changelog-items">
+      <li>Setup window with tabs: NDI Output / Network / Beam Params / About</li>
+      <li>3-panel docked layout: Programmer | Preview | 10-Playback strip</li>
+      <li>Auto-save every 2 minutes with crash recovery dialog on startup</li>
+      <li>Command palette (Ctrl+K) for quick access to all actions</li>
+      <li>Quick Show grid: 32 pages × 6 rows × 10 columns of cue launch pads</li>
+      <li>LivePRO performance mode with XY pad and beat trigger buttons</li>
+      <li>Macro / Executor grid with 32 programmable slots</li>
+      <li>Color and Position palette panels for quick cue coloring</li>
+      <li>Cue thumbnails (128×128 RGBA, background-rendered) in the Cue Library</li>
+      <li>Expression editor with real-time plot preview for automation tracks</li>
+    </ul>
+  </div>
+</section>
+
+<hr>
+<p style="text-align:center;color:var(--text-dim);font-size:0.82rem;padding:24px 0;">
+  IDHMFIS V1.1 User Manual &nbsp;·&nbsp; May 2026 &nbsp;·&nbsp; Created by Onni Kauppinen
+</p>
+
+</div><!-- /page-wrapper -->
+
+<!-- ── Back to Top Button ───────────────────────────── -->
+<button id="back-to-top" title="Back to top" aria-label="Back to top">↑</button>
+
+<script>
+(function() {
+  var btn = document.getElementById('back-to-top');
+  window.addEventListener('scroll', function() {
+    if (window.scrollY > 400) {
+      btn.classList.add('visible');
+    } else {
+      btn.classList.remove('visible');
+    }
+  }, { passive: true });
+  btn.addEventListener('click', function() {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+LIBRARY IDHMFISCapture
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE

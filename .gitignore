@@ -1,0 +1,74 @@
+# Build output
+build/
+out/
+cmake-build-*/
+*.user
+*.suo
+*.sln.docdata
+
+# MSVC / CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+_deps/
+
+# Object files, libs, binaries
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+*.exp
+*.pdb
+*.ilk
+*.map
+*.idb
+*.vc.db
+*.vc.opendb
+
+# Build log scratch files (project root)
+build_log.txt
+build_out*.txt
+build_output*.txt
+build_errors.txt
+build_exitcode.txt
+build_full.txt
+build_number.txt
+BUILDLOG.txt
+inc_build_log.txt
+full_build_log.txt
+cmake_build_out.txt
+compile_output.txt
+configure_out.txt
+fresh_build.txt
+app_output.txt
+attrib_out.txt
+handles.txt
+tasklist.txt
+ps_test.txt
+test_compile.bat
+check_lock.bat
+run_link.bat
+
+# Temp files with absolute paths baked in (not portable)
+C:Temp*.txt
+C:Users*.txt
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# NDI SDK (user must provide via NDISDK_DIR env var)
+NDISDK/
+
+# Crash dumps
+*.dmp

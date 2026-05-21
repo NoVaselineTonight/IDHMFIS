@@ -1,0 +1,89 @@
+---
+# .clang-tidy
+# Root clang-tidy configuration for IDHMFIS.
+# Targets clang-tidy 16+.
+
+Checks: >
+  -*,
+  modernize-*,
+  readability-*,
+  performance-*,
+  bugprone-*,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  -readability-named-parameter,
+  -readability-magic-numbers,
+  -readability-uppercase-literal-suffix,
+  -readability-identifier-length,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -performance-avoid-endl
+
+# Treat all enabled checks as errors
+WarningsAsErrors: >
+  modernize-*,
+  readability-*,
+  performance-*,
+  bugprone-*,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  -readability-named-parameter,
+  -readability-magic-numbers,
+  -readability-uppercase-literal-suffix,
+  -readability-identifier-length,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -performance-avoid-endl
+
+# Only analyse headers under src/ — skip third-party
+HeaderFilterRegex: '^.*/src/.*'
+
+# Analyse system headers? No.
+AnalyzeTemporaryDtors: false
+FormatStyle: file
+
+CheckOptions:
+  # modernize
+  - key:   modernize-loop-convert.MinConfidence
+    value: reasonable
+  - key:   modernize-use-auto.MinTypeNameLength
+    value: '5'
+  - key:   modernize-use-default-member-init.UseAssignment
+    value: '0'
+  - key:   modernize-pass-by-value.IncludeStyle
+    value: google
+
+  # readability
+  - key:   readability-braces-around-statements.ShortStatementLines
+    value: '0'
+  - key:   readability-function-cognitive-complexity.Threshold
+    value: '25'
+  - key:   readability-function-size.LineThreshold
+    value: '80'
+  - key:   readability-function-size.StatementThreshold
+    value: '200'
+  - key:   readability-implicit-bool-conversion.AllowPointerConditions
+    value: '1'
+  - key:   readability-qualified-auto.AddConstToQualified
+    value: '1'
+
+  # performance
+  - key:   performance-move-const-arg.CheckTriviallyCopyableMove
+    value: '1'
+  - key:   performance-unnecessary-value-param.AllowedTypes
+    value: ''
+
+  # bugprone
+  - key:   bugprone-argument-comment.StrictMode
+    value: '0'
+  - key:   bugprone-assert-side-effect.AssertMacros
+    value: assert
+  - key:   bugprone-sizeof-expression.WarnOnSizeOfPointer
+    value: '1'
+  - key:   bugprone-string-constructor.WarnOnLargeLength
+    value: '1'
+  - key:   bugprone-suspicious-string-compare.WarnOnLogicalNotComparison
+    value: '0'
+  - key:   bugprone-unhandled-self-assignment.WarnOnlyIfThisHasSuspiciousField
+    value: '1'
+...

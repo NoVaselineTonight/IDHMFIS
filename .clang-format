@@ -1,0 +1,107 @@
+---
+# .clang-format
+# IDHMFIS project — Google style base with project-specific overrides.
+# Run: clang-format -i src/**/*.cpp src/**/*.h
+
+Language:        Cpp
+BasedOnStyle:    Google
+
+# ── Column / indentation ────────────────────────────────────────────────────
+ColumnLimit:     100
+IndentWidth:     4
+ContinuationIndentWidth: 4
+TabWidth:        4
+UseTab:          Never
+
+# ── Braces & blocks ─────────────────────────────────────────────────────────
+BreakBeforeBraces:       Attach
+BraceWrapping:
+  AfterFunction:         false
+  AfterClass:            false
+  AfterControlStatement: Never
+  AfterEnum:             false
+  AfterNamespace:        false
+  AfterStruct:           false
+  BeforeCatch:           false
+  BeforeElse:            false
+
+# ── Alignment ───────────────────────────────────────────────────────────────
+AlignConsecutiveAssignments:
+  Enabled:               true
+  AcrossEmptyLines:      false
+  AcrossComments:        false
+
+AlignConsecutiveDeclarations:
+  Enabled:               false
+
+AlignConsecutiveMacros:
+  Enabled:               true
+  AcrossEmptyLines:      false
+  AcrossComments:        false
+
+AlignTrailingComments:
+  Kind:                  Always
+  OverEmptyLines:        0
+
+AlignOperands:           Align
+AlignAfterOpenBracket:   Align
+
+# ── Includes ────────────────────────────────────────────────────────────────
+SortIncludes:            CaseSensitive
+IncludeBlocks:           Regroup
+IncludeCategories:
+  # Own project headers first
+  - Regex:    '^"'
+    Priority: 1
+  # System/third-party headers last
+  - Regex:    '^<'
+    Priority: 2
+
+# ── Spacing ─────────────────────────────────────────────────────────────────
+SpaceBeforeParens:           ControlStatements
+SpaceInEmptyParentheses:     false
+SpacesInContainerLiterals:   false
+SpacesInSquareBrackets:      false
+SpaceAfterCStyleCast:        false
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeSquareBrackets:   false
+SpacesBeforeTrailingComments: 2
+
+# ── Templates & angle brackets ──────────────────────────────────────────────
+SpacesInAngles:              Never
+SpaceAfterTemplateKeyword:   false
+
+# ── Pointers & references ───────────────────────────────────────────────────
+PointerAlignment:            Left
+ReferenceAlignment:          Left
+DerivePointerAlignment:      false
+
+# ── Line breaks ─────────────────────────────────────────────────────────────
+AllowShortFunctionsOnASingleLine:      Inline
+AllowShortIfStatementsOnASingleLine:   Never
+AllowShortLoopsOnASingleLine:          false
+AllowShortBlocksOnASingleLine:         Never
+AllowShortCaseLabelsOnASingleLine:     false
+AllowShortLambdasOnASingleLine:        All
+
+BreakConstructorInitializers:   BeforeColon
+BreakInheritanceList:           BeforeColon
+ConstructorInitializerIndentWidth: 4
+PackConstructorInitializers:    BinPack
+
+BreakBeforeTernaryOperators:    true
+BreakStringLiterals:            false
+
+# ── Namespace ───────────────────────────────────────────────────────────────
+NamespaceIndentation:    None
+CompactNamespaces:       false
+FixNamespaceComments:    true
+
+# ── Misc ────────────────────────────────────────────────────────────────────
+MaxEmptyLinesToKeep:     2
+KeepEmptyLinesAtTheStartOfBlocks: false
+ReflowComments:          true
+SortUsingDeclarations:   true
+Cpp11BracedListStyle:    true
+Standard:                c++20
+...

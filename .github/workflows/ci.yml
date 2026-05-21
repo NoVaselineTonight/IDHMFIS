@@ -1,0 +1,222 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  # Single vcpkg commit pinned for reproducibility.
+  # Update this SHA when you want newer vcpkg package versions.
+  VCPKG_COMMIT: "a42af01b72c28a8e1d7b48107b33e4f286a55ef9"
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  windows-build:
+  # ────────────────────────────────────────────────────────────────
+    name: Windows (MSVC 2022, x64, Release)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── vcpkg ──────────────────────────────────────────────────
+      - name: Restore vcpkg from cache
+        id: vcpkg-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/vcpkg
+            ${{ github.workspace }}/vcpkg_installed
+            C:/Users/runneradmin/AppData/Local/vcpkg/archives
+          key: vcpkg-win-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-win-${{ env.VCPKG_COMMIT }}-
+
+      - name: Bootstrap vcpkg
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "${{ github.workspace }}/vcpkg"
+          cd "${{ github.workspace }}/vcpkg"
+          git checkout "${{ env.VCPKG_COMMIT }}"
+          .\bootstrap-vcpkg.bat -disableMetrics
+
+      # ── Vulkan SDK ──────────────────────────────────────────────
+      - name: Install Vulkan SDK (via vcpkg)
+        shell: pwsh
+        run: |
+          $env:VCPKG_ROOT = "${{ github.workspace }}/vcpkg"
+          & "${{ github.workspace }}/vcpkg/vcpkg.exe" install `
+            --triplet x64-windows `
+            --x-install-root "${{ github.workspace }}/vcpkg_installed"
+
+      # ── FetchContent cache ──────────────────────────────────────
+      - name: Cache FetchContent downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/build/_deps
+          key: fetchcontent-win-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            fetchcontent-win-
+
+      # ── Configure ───────────────────────────────────────────────
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -B build -S . `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DENABLE_CLANG_TIDY=OFF `
+            -DENABLE_NDI=OFF `
+            -DIDHMFIS_BUILD_TESTS=ON `
+            -DIDHMFIS_BUILD_TOOLS=ON
+
+      # ── Build ────────────────────────────────────────────────────
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      # ── Upload artefact ──────────────────────────────────────────
+      - name: Upload Windows binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: IDHMFIS-windows-x64
+          path: build/bin/Release/IDHMFIS.exe
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────
+  macos-build:
+  # ────────────────────────────────────────────────────────────────
+    name: macOS 14 (arm64, Clang, Release)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── System dependencies ──────────────────────────────────────
+      - name: Install system dependencies
+        run: |
+          brew update
+          brew install cmake ninja vulkan-headers molten-vk
+
+      # ── FetchContent cache ───────────────────────────────────────
+      - name: Cache FetchContent downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/build/_deps
+          key: fetchcontent-macos-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            fetchcontent-macos-
+
+      # ── Configure ────────────────────────────────────────────────
+      - name: Configure CMake
+        run: |
+          cmake -B build -S . \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DENABLE_CLANG_TIDY=OFF \
+            -DENABLE_NDI=OFF \
+            -DIDHMFIS_BUILD_TESTS=ON \
+            -DIDHMFIS_BUILD_TOOLS=ON
+
+      # ── Build ─────────────────────────────────────────────────────
+      - name: Build
+        run: cmake --build build --parallel
+
+      # ── Upload artefact ───────────────────────────────────────────
+      - name: Upload macOS binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: IDHMFIS-macos-arm64
+          path: build/bin/IDHMFIS
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────
+  clang-tidy:
+  # ────────────────────────────────────────────────────────────────
+    name: clang-tidy (Ubuntu, diff analysis)
+    runs-on: ubuntu-latest
+    # Only run on PRs where we have a diff to analyse
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Dependencies ──────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            cmake ninja-build \
+            clang-18 clang-tidy-18 \
+            libvulkan-dev \
+            libasound2-dev \
+            libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxi-dev
+
+      # ── FetchContent cache ────────────────────────────────────────
+      - name: Cache FetchContent downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/build/_deps
+          key: fetchcontent-ubuntu-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            fetchcontent-ubuntu-
+
+      # ── Configure (generates compile_commands.json) ───────────────
+      - name: Configure CMake
+        run: |
+          cmake -B build -S . \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DENABLE_CLANG_TIDY=ON \
+            -DENABLE_NDI=OFF \
+            -DIDHMFIS_BUILD_TESTS=ON \
+            -DIDHMFIS_BUILD_TOOLS=ON
+
+      # ── Run clang-tidy on changed files only ──────────────────────
+      - name: Run clang-tidy on diff
+        run: |
+          # Get list of changed .cpp files against the base branch
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            | grep '\.cpp$' \
+            | grep '^src/' \
+            || true)
+
+          if [ -z "$CHANGED" ]; then
+            echo "No C++ source files changed — skipping clang-tidy."
+            exit 0
+          fi
+
+          echo "Running clang-tidy on:"
+          echo "$CHANGED"
+
+          ERRORS=0
+          for f in $CHANGED; do
+            clang-tidy-18 \
+              --config-file=.clang-tidy \
+              --header-filter='src/.*' \
+              -p build/compile_commands.json \
+              "$f" 2>&1 || ERRORS=$((ERRORS + 1))
+          done
+
+          if [ $ERRORS -gt 0 ]; then
+            echo "clang-tidy reported errors in $ERRORS file(s)."
+            exit 1
+          fi

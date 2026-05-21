@@ -1,0 +1,3 @@
+file(GLOB_RECURSE _safety_sources "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
+list(APPEND IDHMFIS_SOURCES ${_safety_sources})
+set(IDHMFIS_SOURCES ${IDHMFIS_SOURCES} PARENT_SCOPE)

@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  installer/IDHMFIS.wxs
+  WiX 4 installer descriptor for IDHMFIS.
+  Build with: wix build IDHMFIS.wxs -o dist\IDHMFIS-Setup-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <!--
+    UpgradeCode is a stable GUID that identifies this product family across
+    all versions.  Do NOT change this GUID once the installer is shipped —
+    changing it breaks the upgrade chain and leaves old versions unremoved.
+    Generated once with New-Guid / uuidgen for this project.
+  -->
+  <Package
+    Name="IDHMFIS"
+    Version="0.1.0"
+    Manufacturer="IDHMFIS Project"
+    UpgradeCode="3E6F8A2D-71C4-4B9E-9F0A-8D3C5E1B7F92"
+    Language="1033"
+    Codepage="1252"
+    InstallerVersion="500"
+    Scope="perMachine"
+    Compressed="yes">
+
+    <!-- ── Media ────────────────────────────────────────────────── -->
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- ── Upgrade logic (major upgrades) ──────────────────────── -->
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of IDHMFIS is already installed."
+      Schedule="afterInstallInitialize" />
+
+    <!-- ── Properties ───────────────────────────────────────────── -->
+    <Property Id="ARPPRODUCTICON"    Value="IDHMFIS.ico" />
+    <Property Id="ARPHELPLINK"       Value="https://github.com/IDHMFIS/IDHMFIS" />
+    <Property Id="ARPURLINFOABOUT"   Value="https://github.com/IDHMFIS/IDHMFIS" />
+    <Property Id="ARPNOMODIFY"       Value="1" />
+
+    <!-- ── Feature ──────────────────────────────────────────────── -->
+    <Feature Id="MainFeature" Title="IDHMFIS" Level="1">
+      <ComponentGroupRef Id="MainComponents" />
+      <ComponentGroupRef Id="AssetsComponents" />
+      <ComponentRef Id="StartMenuShortcutComponent" />
+    </Feature>
+
+    <!-- ── Directory tree ───────────────────────────────────────── -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="IDHMFIS" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="STARTMENUFOLDER" Name="IDHMFIS" />
+    </StandardDirectory>
+
+    <!-- ── Main executable component ───────────────────────────── -->
+    <ComponentGroup Id="MainComponents" Directory="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+        <File
+          Id="IDHMFIS_EXE"
+          Source="$(var.SourceDir)\IDHMFIS.exe"
+          KeyPath="yes" />
+
+        <!-- Remove the install directory on uninstall if empty -->
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RegistryValue
+          Root="HKLM"
+          Key="Software\IDHMFIS"
+          Name="InstallDir"
+          Type="string"
+          Value="[INSTALLFOLDER]"
+          KeyPath="no" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ── Assets component group ───────────────────────────────── -->
+    <!--
+      WiX 4 Heat replacement: list asset files explicitly or use a
+      HarvestDirectory element if using WiX Toolset Extensions.
+      For the stub installer we reference the assets directory tree.
+    -->
+    <ComponentGroup Id="AssetsComponents" Directory="INSTALLFOLDER">
+      <Component Id="AssetsDir" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+        <!-- Placeholder: actual asset files are added by the build script
+             via wix build -d SourceDir=... which populates this section.
+             This component keeps the directory reference valid. -->
+        <CreateFolder Directory="INSTALLFOLDER" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ── Start menu shortcut ──────────────────────────────────── -->
+    <Component Id="StartMenuShortcutComponent"
+               Directory="STARTMENUFOLDER"
+               Guid="C3D4E5F6-A7B8-9012-CDEF-012345678902">
+      <Shortcut
+        Id="StartMenuShortcut"
+        Name="IDHMFIS"
+        Description="IDHMFIS Laser Show Programming Application"
+        Target="[INSTALLFOLDER]IDHMFIS.exe"
+        WorkingDirectory="INSTALLFOLDER"
+        Icon="IDHMFIS.ico" />
+      <RemoveFolder Id="RemoveStartMenuFolder" Directory="STARTMENUFOLDER" On="uninstall" />
+      <RegistryValue
+        Root="HKCU"
+        Key="Software\IDHMFIS\StartMenu"
+        Name="installed"
+        Type="integer"
+        Value="1"
+        KeyPath="yes" />
+    </Component>
+
+    <!-- ── Icons ────────────────────────────────────────────────── -->
+    <Icon Id="IDHMFIS.ico" SourceFile="$(var.SourceDir)\assets\IDHMFIS.ico" />
+
+    <!-- ── Add/Remove Programs metadata ────────────────────────── -->
+    <Property Id="ARPCOMMENTS">
+      Professional laser show programming software.
+    </Property>
+
+    <!-- WiX 4 UI extension reference (minimal UI) -->
+    <UIRef Id="WixUI_Minimal" />
+
+    <!-- Accept the EULA automatically in silent installs -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+  </Package>
+</Wix>
