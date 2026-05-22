@@ -418,19 +418,35 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
     // Always shows kGroupSlotCount slots. Occupied = named group. Empty = dashed.
     // REC mode: click any slot (empty OR occupied) → record/overwrite group.
     {
-        // Groups grid uses the same column count and cell height as the output grid
-        const int grp_cols = s_grid_cols;
+        // Groups grid has its own independent column count and cell height.
+        static int   s_grp_grid_cols = 4;
+        static float s_grp_cell_h    = 30.f;
+        const int grp_cols = s_grp_grid_cols;
         const float gw = (avail_w - cell_gap * (static_cast<float>(grp_cols) - 1.f))
                          / static_cast<float>(grp_cols);
-        const float gh = cell_h;
+        const float gh = s_grp_cell_h;
 
-        // Section label
+        // Section label + settings gear
         if (ctx.rec_armed) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.35f, 0.35f, 1.f));
             ImGui::TextUnformatted("GROUPS  [REC: click slot to record]");
             ImGui::PopStyleColor();
         } else {
             ImGui::TextDisabled("GROUPS");
+        }
+        ImGui::SameLine(0, 8.f);
+        if (ImGui::SmallButton("[=]##gg_cfg")) ImGui::OpenPopup("##gg_settings");
+        ImGui::SetItemTooltip("Group grid settings");
+        if (ImGui::BeginPopup("##gg_settings")) {
+            ImGui::TextUnformatted("Group Grid Settings");
+            ImGui::Separator();
+            ImGui::SetNextItemWidth(140.f);
+            ImGui::SliderInt("Columns##ggc", &s_grp_grid_cols, 1, 8, "%d",
+                             ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SetNextItemWidth(140.f);
+            ImGui::DragFloat("Cell Height##ggh", &s_grp_cell_h, 0.5f, 18.f, 60.f, "%.0f px",
+                             ImGuiSliderFlags_AlwaysClamp);
+            ImGui::EndPopup();
         }
         ImGui::Spacing();
 
@@ -564,6 +580,8 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                         s_pending_slot = slot;
                         s_show_grp_modal = true;
                         ImGui::OpenPopup(kGrpModalId);
+                    } else {
+                        ctx.rec_armed = false;  // nothing to record — disarm
                     }
                 } else if (grp) {
                     std::vector<int> old_ids_grp = state.active_stream_ids;
@@ -674,37 +692,36 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
     }
 
     // ── AUTO GROUPS ───────────────────────────────────────────────────────────
-    // Generates groups automatically from the current output layout.
+    // Compact button → popup: generates symmetrical groups from the output layout.
     {
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
-        static bool s_auto_expanded = false;
-        if (ImGui::SmallButton(s_auto_expanded ? "v AUTO GROUPS" : "> AUTO GROUPS"))
-            s_auto_expanded = !s_auto_expanded;
+        static int s_auto_mode = 0;
 
-        if (s_auto_expanded) {
-            ImGui::Spacing();
-            static int s_auto_mode = 0;  // 0=Odd/Even, 1=Centre Out
-            ImGui::SetNextItemWidth(180.f);
-            ImGui::Combo("Mode##ag_mode", &s_auto_mode, "Odd / Even\0Centre Out\0");
-            ImGui::SetItemTooltip(
-                "Odd/Even: split outputs by 1-based position parity.\n"
-                "Centre Out: pair outputs symmetrically inward; outer pairs = group A, inner = group B.");
+        if (ImGui::SmallButton("AUTO GROUPS..."))
+            ImGui::OpenPopup("##auto_groups_popup");
+        ImGui::SetItemTooltip("Auto-generate symmetrical groups from the current output layout");
+
+        if (ImGui::BeginPopup("##auto_groups_popup")) {
+            ImGui::TextUnformatted("Auto Generate Groups");
+            ImGui::Separator();
+
+            ImGui::SetNextItemWidth(200.f);
+            ImGui::Combo("Mode##ag_mode", &s_auto_mode,
+                "Odd / Even\0"
+                "Centre Out\0"
+                "First / Last Half\0"
+                "Zigzag Pairs\0");
+            switch (s_auto_mode) {
+            case 0: ImGui::TextDisabled("Odd positions vs Even positions"); break;
+            case 1: ImGui::TextDisabled("Outer pairs vs Inner pairs (symmetric)"); break;
+            case 2: ImGui::TextDisabled("First half vs Second half by display order"); break;
+            case 3: ImGui::TextDisabled("Adjacent pairs: 1+2 vs 3+4 vs ..."); break;
+            }
 
             ImGui::Spacing();
-            // Find the first N free slots (starting from 0) to place the 4 generated groups
-            auto find_free_slots = [&](int count) -> std::vector<int> {
-                std::vector<int> slots;
-                for (int s2 = 0; s2 < kGroupSlotCount && (int)slots.size() < count; ++s2) {
-                    bool occupied = false;
-                    for (const auto& g : state.output_groups)
-                        if (g.id == s2) { occupied = true; break; }
-                    if (!occupied) slots.push_back(s2);
-                }
-                return slots;
-            };
 
             // Collect enabled outputs in display order (s_cell_order)
             auto get_ordered_outputs = [&]() -> std::vector<int> {
@@ -717,21 +734,38 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                 return ids;
             };
 
-            if (ImGui::Button("Generate Groups##ag_gen")) {
+            // Find the first N free slots
+            auto find_free_slots = [&](int count) -> std::vector<int> {
+                std::vector<int> slots;
+                for (int s2 = 0; s2 < kGroupSlotCount && (int)slots.size() < count; ++s2) {
+                    bool occupied = false;
+                    for (const auto& g : state.output_groups)
+                        if (g.id == s2) { occupied = true; break; }
+                    if (!occupied) slots.push_back(s2);
+                }
+                return slots;
+            };
+
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.08f, 0.50f, 0.14f, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.12f, 0.72f, 0.20f, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.05f, 0.32f, 0.08f, 1.f));
+            bool do_gen = ImGui::Button("Generate##ag_gen", ImVec2(-1.f, 0.f));
+            ImGui::PopStyleColor(3);
+
+            if (do_gen) {
                 std::vector<int> ordered = get_ordered_outputs();
                 int N = static_cast<int>(ordered.size());
                 if (N >= 2) {
                     std::vector<int> groupA, groupB;
 
                     if (s_auto_mode == 0) {
-                        // Odd/Even by 1-based position
+                        // Odd/Even: odd 1-based positions vs even
                         for (int i = 0; i < N; ++i) {
-                            if ((i % 2) == 0) groupA.push_back(ordered[i]);  // 1st, 3rd, ... (odd)
-                            else              groupB.push_back(ordered[i]);  // 2nd, 4th, ... (even)
+                            if ((i % 2) == 0) groupA.push_back(ordered[i]);
+                            else              groupB.push_back(ordered[i]);
                         }
-                    } else {
-                        // Centre Out: alternate pairs inward from outside
-                        // Pair (0,N-1), (1,N-2), ... → alternate pairs into A and B
+                    } else if (s_auto_mode == 1) {
+                        // Centre Out: alternate pairs from outside in
                         int half = N / 2;
                         for (int p = 0; p < half; ++p) {
                             int left  = ordered[p];
@@ -739,14 +773,29 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                             if ((p % 2) == 0) { groupA.push_back(left); groupA.push_back(right); }
                             else              { groupB.push_back(left); groupB.push_back(right); }
                         }
-                        if (N % 2 == 1) groupB.push_back(ordered[half]); // odd centre element → B
+                        if (N % 2 == 1) groupB.push_back(ordered[half]);
+                    } else if (s_auto_mode == 2) {
+                        // First/Last Half: simple midpoint split
+                        int half = N / 2;
+                        for (int i = 0; i < half; ++i)        groupA.push_back(ordered[i]);
+                        for (int i = half; i < N; ++i)        groupB.push_back(ordered[i]);
+                    } else {
+                        // Zigzag Pairs: adjacent pairs alternate A/B  (1+2→A, 3+4→B, 5+6→A, ...)
+                        for (int i = 0; i + 1 < N; i += 2) {
+                            if (((i / 2) % 2) == 0) {
+                                groupA.push_back(ordered[i]);
+                                groupA.push_back(ordered[i + 1]);
+                            } else {
+                                groupB.push_back(ordered[i]);
+                                groupB.push_back(ordered[i + 1]);
+                            }
+                        }
+                        if (N % 2 == 1) groupB.push_back(ordered[N - 1]);
                     }
 
-                    // Right half = outputs in the upper half of display order (used for mirroring)
-                    std::vector<int> right_half;
-                    for (int i = N / 2; i < N; ++i)
-                        right_half.push_back(ordered[i]);
-
+                    // Compute mirror subsets per mode:
+                    // - Spatial modes (Centre Out, First/Last Half): right half of all outputs
+                    // - Alternating modes (Odd/Even, Zigzag): opposite group is the mirror
                     auto intersect = [](const std::vector<int>& a, const std::vector<int>& b) {
                         std::vector<int> out;
                         for (int x : a)
@@ -755,31 +804,41 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                         return out;
                     };
 
-                    // Generate 4 groups: A normal, A mirrored, B normal, B mirrored
-                    // (or 2 if only one group has members)
-                    struct GenGroup { std::vector<int> members; std::vector<int> mirrored; std::string suffix; };
-                    std::vector<GenGroup> gg;
-                    if (!groupA.empty()) {
-                        gg.push_back({ groupA, {},                     "(Odd)"    });
-                        gg.push_back({ groupA, intersect(groupA, right_half), "(Odd Mirror)"   });
-                    }
-                    if (!groupB.empty()) {
-                        gg.push_back({ groupB, {},                     "(Even)"   });
-                        gg.push_back({ groupB, intersect(groupB, right_half), "(Even Mirror)"  });
-                    }
-                    if (s_auto_mode == 1) {
-                        // Rename to Outer/Inner for Centre Out mode
-                        const char* names[] = { "(Outer)", "(Outer Mirror)", "(Inner)", "(Inner Mirror)" };
-                        for (size_t gi = 0; gi < gg.size() && gi < 4; ++gi)
-                            gg[gi].suffix = names[gi];
+                    std::vector<int> right_half;
+                    for (int i = N / 2; i < N; ++i)
+                        right_half.push_back(ordered[i]);
+
+                    // For spatial modes (Centre Out=1, First/Last=2): mirror = right-half intersection.
+                    // For alternating modes (Odd/Even=0, Zigzag=3): mirror = the complementary group.
+                    std::vector<int> mirA, mirB;
+                    if (s_auto_mode == 1 || s_auto_mode == 2) {
+                        mirA = intersect(groupA, right_half);
+                        mirB = intersect(groupB, right_half);
+                    } else {
+                        mirA = groupB;  // Odd group mirrors Even (and vice versa)
+                        mirB = groupA;
                     }
 
-                    // Find enough free slots
+                    // Mode-specific label prefixes
+                    static const char* kPrefixA[] = { "(Odd)",   "(Outer)", "(First)", "(Pair A)" };
+                    static const char* kPrefixB[] = { "(Even)",  "(Inner)", "(Last)",  "(Pair B)" };
+                    static const char* kBase[]     = { "Auto",    "Sym",     "Half",    "ZZ"       };
+
+                    struct GenGroup { std::vector<int> members; std::vector<int> mirrored; std::string name; };
+                    std::vector<GenGroup> gg;
+                    if (!groupA.empty()) {
+                        gg.push_back({ groupA, {},    std::string(kBase[s_auto_mode]) + kPrefixA[s_auto_mode] });
+                        gg.push_back({ groupA, mirA,  std::string(kBase[s_auto_mode]) + kPrefixA[s_auto_mode] + " Mir" });
+                    }
+                    if (!groupB.empty()) {
+                        gg.push_back({ groupB, {},    std::string(kBase[s_auto_mode]) + kPrefixB[s_auto_mode] });
+                        gg.push_back({ groupB, mirB,  std::string(kBase[s_auto_mode]) + kPrefixB[s_auto_mode] + " Mir" });
+                    }
+
                     std::vector<int> free_slots = find_free_slots(static_cast<int>(gg.size()));
                     int placed = std::min((int)gg.size(), (int)free_slots.size());
 
                     for (int gi = 0; gi < placed; ++gi) {
-                        // Remove any existing group in the target slot
                         state.output_groups.erase(
                             std::remove_if(state.output_groups.begin(), state.output_groups.end(),
                                 [&](const UIState::OutputGroup& g) { return g.id == free_slots[gi]; }),
@@ -787,24 +846,23 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
 
                         UIState::OutputGroup ng;
                         ng.id           = free_slots[gi];
-                        ng.name         = (s_auto_mode == 0 ? "Auto" : "Sym") + gg[gi].suffix;
+                        ng.name         = gg[gi].name;
                         ng.member_ids   = gg[gi].members;
                         ng.mirrored_ids = gg[gi].mirrored;
                         state.output_groups.push_back(std::move(ng));
                     }
                     if (placed > 0 && cbs.on_groups_changed)
                         cbs.on_groups_changed();
+                    ImGui::CloseCurrentPopup();
                 } else {
-                    ImGui::OpenPopup("##ag_need2");
+                    // not enough outputs — keep popup open, show hint
                 }
             }
-            if (ImGui::BeginPopup("##ag_need2")) {
-                ImGui::TextDisabled("Need at least 2 outputs to generate groups.");
-                ImGui::EndPopup();
-            }
-            ImGui::SetItemTooltip(
-                "Generates 4 groups (normal + mirrored variants) into the first available slots.\n"
-                "Mirror variant: right-side outputs receive X-flipped output.");
+
+            if (get_ordered_outputs().size() < 2)
+                ImGui::TextColored(ImVec4(1.f,0.5f,0.3f,1.f), "Need >= 2 enabled outputs.");
+
+            ImGui::EndPopup();
         }
     }
 

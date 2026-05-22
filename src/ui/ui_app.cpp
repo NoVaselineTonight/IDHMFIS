@@ -1016,6 +1016,11 @@ void Application::Impl::do_load_project(const std::string& path) {
                 layout_ctx.patch_selected_id = state.patched_outputs.front().id;
             else
                 layout_ctx.patch_selected_id = -1;
+            // Restore active_stream_ids BEFORE calling on_output_patch_changed so
+            // step 7 of the callback can correctly propagate them to the engine.
+            // (The first teardown call above cleared state.active_stream_ids to
+            // empty, so without this the engine would end up with no active streams.)
+            state.active_stream_ids = project->active_stream_ids;
             if (layout_cbs.on_output_patch_changed) {
                 std::vector<OutputStreamConfig> cfgs;
                 cfgs.reserve(state.patched_outputs.size());
@@ -1038,6 +1043,10 @@ void Application::Impl::do_load_project(const std::string& path) {
             }
             state.output_group_next_id = project->output_group_next_id;
         }
+        // Clear mirrored stream state — not persisted; determined by which group is active.
+        // Send to engine so stale mirrored IDs from the previous session are cleared.
+        state.active_mirrored_stream_ids.clear();
+        engine->send(cmd::SetMirroredStreams{{}});
         // Restore network config
         {
             const auto& src = project->net_config;
@@ -1157,7 +1166,8 @@ void Application::Impl::do_load_project(const std::string& path) {
             dst.brightness_boost = src.brightness_boost;
             dst.glow_radius      = src.glow_radius;
         }
-        state.active_stream_ids = project->active_stream_ids;
+        // active_stream_ids already restored before on_output_patch_changed above
+        // (the callback filters it to valid IDs; do not overwrite here).
         // Restore ui_layout context — reset init flags so dockspace/layout rebuilds cleanly
         layout_ctx.active_view             = static_cast<LayoutContext::ViewMode>(project->ui_layout.active_view);
         layout_ctx.show_layout_initialised = false;
@@ -1206,7 +1216,9 @@ void Application::Impl::do_new_project() {
     state.output_groups.clear();
     state.output_group_next_id = 1;
 
-    // Clear active streams
+    // Capture old active IDs before clearing — needed so on_active_streams_changed
+    // can correctly latch any programmer content that was live on those heads.
+    std::vector<int> old_active_ids = state.active_stream_ids;
     state.active_stream_ids.clear();
 
     // Reset playback snap
@@ -1240,6 +1252,7 @@ void Application::Impl::do_new_project() {
     // Engine reset
     engine->send(cmd::LoadProject{ project });
     engine->send(cmd::ClearProgrammer{});
+    engine->send(cmd::SetMirroredStreams{{}});  // clear stale mirrored-stream state
 
     // Notify engine of empty patch and empty active-stream set.
     // Wait for all in-flight DacManager stops to complete before returning
@@ -1249,16 +1262,16 @@ void Application::Impl::do_new_project() {
     while (dacs_stopping_.load(std::memory_order_acquire) > 0)
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     if (layout_cbs.on_active_streams_changed)
-        layout_cbs.on_active_streams_changed(state.active_stream_ids, {});
-    state.active_stream_ids.clear();
+        layout_cbs.on_active_streams_changed(old_active_ids, {});
 
     log::info("do_new_project: blank show created");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  check_output_health — background reconcile: every patched laser should have
-//  a running DacManager draining the correct bus.  If one is missing or stopped,
-//  re-trigger on_output_patch_changed so the manager is recreated.
+//  a DacManager in the map.  Only repairs if the manager is completely missing
+//  (not in laser_managers_) — we do NOT restart managers that exist but are
+//  still probing/connecting, since probe takes up to several seconds.
 // ─────────────────────────────────────────────────────────────────────────────
 void Application::Impl::check_output_health() {
     if (dacs_stopping_.load(std::memory_order_acquire) > 0) return;  // patch change in flight
@@ -1268,20 +1281,23 @@ void Application::Impl::check_output_health() {
     for (const auto& po : state.patched_outputs) {
         if (po.type != OutputStreamType::Laser || !po.enabled) continue;
         auto it = laser_managers_.find(po.id);
-        if (it == laser_managers_.end() || !it->second->is_running()) {
+        if (it == laser_managers_.end()) {
+            // Manager completely absent — needs to be created
             needs_repair = true;
+            log::warn("output_health: no DacManager for laser id=%d — re-applying patch", po.id);
             break;
         }
+        // Manager exists but not running yet: probe/connect is still in progress — leave it alone.
     }
 
     if (needs_repair) {
-        log::warn("output_health: manager missing or stopped — re-applying patch");
         std::vector<OutputStreamConfig> cfgs;
         cfgs.reserve(state.patched_outputs.size());
         for (const auto& po : state.patched_outputs)
             cfgs.push_back(po.config);
         if (layout_cbs.on_output_patch_changed)
             layout_cbs.on_output_patch_changed(cfgs);
+        // on_output_patch_changed step 7 already sends SetActiveStreams — no need to repeat.
     }
 }
 
@@ -1787,16 +1803,31 @@ void Application::Impl::wire_callbacks() {
     };
     layout_cbs.on_undo          = [this]() {
         state.project_dirty = true;
+        // Fine-grained undo: pop one frame-editor step first (works even when FE
+        // is not focused, so clicking elsewhere between edits stays granular).
+        auto& fe = layout_ctx.frame_editor;
+        if (!fe.fe_undo_stack.empty()) {
+            fe.fe_redo_stack.push_back(fe.objects);
+            if (static_cast<int>(fe.fe_redo_stack.size()) > FrameEditorState::kMaxUndoDepth)
+                fe.fe_redo_stack.erase(fe.fe_redo_stack.begin());
+            fe.objects = std::move(fe.fe_undo_stack.back());
+            fe.fe_undo_stack.pop_back();
+            fe.selected_ids.clear();
+            return;
+        }
+        // Coarse-grained undo: restore full programmer state from before last CLR
         if (!layout_ctx.programmer_undo_stack.empty() && !layout_ctx.fe_window_focused) {
             ProgrammerUndoEntry entry = std::move(layout_ctx.programmer_undo_stack.back());
             layout_ctx.programmer_undo_stack.pop_back();
             layout_ctx.frame_editor        = std::move(entry.frame_editor);
             layout_ctx.programmer_global   = std::move(entry.programmer_global);
             layout_ctx.programmer_fx_layer = std::move(entry.programmer_fx_layer);
-            layout_ctx.programmer_feeds    = std::move(entry.programmer_feeds);
-            state.active_stream_ids        = entry.active_stream_ids;
-            state.active_group_id          = entry.active_group_id;
+            layout_ctx.programmer_feeds          = std::move(entry.programmer_feeds);
+            state.active_stream_ids              = entry.active_stream_ids;
+            state.active_mirrored_stream_ids     = entry.active_mirrored_stream_ids;
+            state.active_group_id                = entry.active_group_id;
             engine->send(cmd::SetActiveStreams{ state.active_stream_ids });
+            engine->send(cmd::SetMirroredStreams{ state.active_mirrored_stream_ids });
         }
     };
     layout_cbs.on_redo          = [this]() { state.project_dirty = true; };
@@ -2334,15 +2365,14 @@ void Application::Impl::wire_callbacks() {
 
     // Cuestack editor: jump to specific cue by index
     layout_cbs.on_playback_cue_jump = [this](int pb_id, int cue_idx) {
-        // Convert index to major cue number (1-based) for SetPlaybackJump
-        if (!project) return;
-        for (const auto& pb : project->playbacks) {
-            if (pb.id == pb_id && cue_idx >= 0 && cue_idx < static_cast<int>(pb.cuelist.size())) {
-                int major = pb.cuelist[static_cast<size_t>(cue_idx)].number.major;
-                engine->send(cmd::SetPlaybackJump{ pb_id, major, 0 });
-                engine->send(cmd::SetPlaybackGo{ pb_id });
-                break;
-            }
+        // Use the live engine snapshot (state.pb_cuelist) rather than project->playbacks,
+        // which may be stale if cues were added/deleted since the last save.
+        if (state.pb_cuelist_pb_id == pb_id
+            && cue_idx >= 0
+            && cue_idx < static_cast<int>(state.pb_cuelist.size())) {
+            int major = state.pb_cuelist[static_cast<size_t>(cue_idx)].number.major;
+            engine->send(cmd::SetPlaybackJump{ pb_id, major, 0 });
+            engine->send(cmd::SetPlaybackGo{ pb_id });
         }
     };
 

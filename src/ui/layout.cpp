@@ -924,8 +924,9 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
                 entry.programmer_global   = ctx.programmer_global;
                 entry.programmer_fx_layer = ctx.programmer_fx_layer;
                 entry.programmer_feeds    = ctx.programmer_feeds;
-                entry.active_stream_ids   = state.active_stream_ids;
-                entry.active_group_id     = state.active_group_id;
+                entry.active_stream_ids          = state.active_stream_ids;
+                entry.active_mirrored_stream_ids = state.active_mirrored_stream_ids;
+                entry.active_group_id            = state.active_group_id;
                 ctx.programmer_undo_stack.push_back(std::move(entry));
                 if (ctx.programmer_undo_stack.size() > 32)
                     ctx.programmer_undo_stack.erase(ctx.programmer_undo_stack.begin());
@@ -3012,7 +3013,7 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                             if (s_set_all_col == 2) fce2.timing.fade_in  = s_set_all_val;
                             else if (s_set_all_col == 3) fce2.timing.hold     = s_set_all_val;
                             else if (s_set_all_col == 4) fce2.timing.fade_out = s_set_all_val;
-                            else if (s_set_all_col == 5) fce2.timing.delay_in = s_set_all_val;
+                            else if (s_set_all_col == 5) fce2.timing.wait     = s_set_all_val;
                             if (cbs.on_playback_cue_update)
                                 cbs.on_playback_cue_update(pb_id, ci2, fce2);
                         }
@@ -3591,6 +3592,11 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
 
                         ImGui::PushID(i);
 
+                        // REM mode: tint row red to signal destructive delete on click
+                        if (state.rem_mode)
+                            ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                                IM_COL32(160, 30, 20, 90));
+
                         // Col 0 — Cue#
                         ImGui::TableSetColumnIndex(0);
                         char num_buf[16];
@@ -3603,9 +3609,21 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                         bool row_rclick = ImGui::IsItemHovered()
                                           && ImGui::IsMouseClicked(ImGuiMouseButton_Right);
 
-                        if (row_clicked) ctx.cuelist_selected_idx = i;
-                        if (row_dbl && cbs.on_cuelist_jump) cbs.on_cuelist_jump(i + 1, 0);
-                        if (row_rclick) ImGui::OpenPopup("##cs_ctx");
+                        if (state.rem_mode) {
+                            // REM armed: click deletes the cue
+                            if (row_clicked) {
+                                if (cbs.on_delete_cue) cbs.on_delete_cue(i);
+                                if (ctx.cuelist_selected_idx == i) ctx.cuelist_selected_idx = -1;
+                                state.rem_mode = false;
+                                ImGui::PopID();
+                                break;  // iterator invalidated
+                            }
+                            ImGui::SetItemTooltip("REM: click to DELETE this cue");
+                        } else {
+                            if (row_clicked) ctx.cuelist_selected_idx = i;
+                            if (row_dbl && cbs.on_cuelist_jump) cbs.on_cuelist_jump(i + 1, 0);
+                            if (row_rclick) ImGui::OpenPopup("##cs_ctx");
+                        }
 
                         // Col 1 — Name (double-click to edit inline)
                         ImGui::TableSetColumnIndex(1);
@@ -7542,6 +7560,9 @@ fe_timeline_draw:
         if (draw_premade_shapes_panel(fe)) {
             fe_push_undo();
             generate_premade_shapes(fe.premade_shapes, fe.objects, fe.next_object_id);
+            // Apply symmetry copies for the newly placed shapes
+            if (fe.symmetry != SM::None)
+                fe_apply_symmetry_to_all_objects(fe);
         }
 
         // If the user closed the panel via the X button, switch back to Select

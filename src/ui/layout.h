@@ -250,10 +250,10 @@ struct FrameEditorState {
             Linear, Quadratic, Cubic, Sine, Cosine,
             Circle, Spiral, Lissajous
         };
-        FuncType func = FuncType::Sine;
+        FuncType func = FuncType::Linear;
 
-        float param_a = 1.f;
-        float param_b = 1.f;
+        float param_a = 0.f;  // slope=0 → flat horizontal line of objects
+        float param_b = 0.f;
         float param_c = 0.f;
         float param_d = 0.f;
         float lissajous_a     = 3.f;
@@ -521,6 +521,7 @@ struct ProgrammerUndoEntry {
     FxLayer                                              programmer_fx_layer;
     std::unordered_map<std::string, ProgrammerFeedState> programmer_feeds;
     std::vector<int>                                     active_stream_ids;
+    std::vector<int>                                     active_mirrored_stream_ids;
     int                                                  active_group_id = -1;
 };
 
