@@ -148,6 +148,15 @@ TimelineEngine::tick(const TimecodeState& tc, double dt_s)
             bool in_range = (def.length_frames <= 0)
                          || (new_pos < def.length_frames);
             if (rt.state == TimelineState::Armed && in_range) {
+                if (new_pos > jump_thresh) {
+                    // Initial sync to a large TC position (e.g. LTC at 01:00:00:00).
+                    // Snap position without firing events to avoid mass-firing all events
+                    // from last_event_pos (-1) up to the current TC position at once.
+                    rt.pos            = new_pos;
+                    rt.last_event_pos = new_pos - 1;
+                    rt.state          = TimelineState::Playing;
+                    continue;
+                }
                 rt.state = TimelineState::Playing;
             }
 

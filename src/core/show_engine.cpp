@@ -1405,6 +1405,13 @@ void ShowEngine::process_commands()
                     sync_cuelist_to_project();
                 }
             }
+            else if constexpr (std::is_same_v<T, cmd::MoveCue>) {
+                if (c.from_idx >= 0 && c.from_idx < cue_list_.entry_count() &&
+                    c.to_idx   >= 0 && c.to_idx   < cue_list_.entry_count()) {
+                    cue_list_.move_entry(c.from_idx, c.to_idx);
+                    sync_cuelist_to_project();
+                }
+            }
             else if constexpr (std::is_same_v<T, cmd::SetZone>) {
                 Zone* existing = zone_manager_.get_zone(c.zone.id);
                 if (existing)
@@ -2928,9 +2935,14 @@ void ShowEngine::build_frame()
                         for (auto& pt : morph_pts)
                             points.push_back(pt);
                     } else {
-                        for (int sid : assigned)
-                            for (const auto& pt : morph_pts)
+                        for (int sid : assigned) {
+                            bool is_mir = !fce.mirrored_ids.empty() &&
+                                          std::find(fce.mirrored_ids.begin(), fce.mirrored_ids.end(), sid) != fce.mirrored_ids.end();
+                            for (auto pt : morph_pts) {   // copy by value
+                                if (is_mir) pt.x = static_cast<int16_t>(-pt.x);
                                 per_stream_extras[sid].push_back(pt);
+                            }
+                        }
                     }
                 }
             }
@@ -3044,9 +3056,14 @@ void ShowEngine::build_frame()
                     for (auto& pt : pb_pts)
                         points.push_back(pt);
                 } else {
-                    for (int sid : assigned)
-                        for (const auto& pt : pb_pts)
+                    for (int sid : assigned) {
+                        bool is_mir = !fce.mirrored_ids.empty() &&
+                                      std::find(fce.mirrored_ids.begin(), fce.mirrored_ids.end(), sid) != fce.mirrored_ids.end();
+                        for (auto pt : pb_pts) {   // copy by value
+                            if (is_mir) pt.x = static_cast<int16_t>(-pt.x);
                             per_stream_extras[sid].push_back(pt);
+                        }
+                    }
                 }
             }
         }

@@ -134,6 +134,7 @@ struct DeleteCue     { int idx; };
 struct InsertCue     { int after_idx; FullCueEntry entry; };
 struct RenameCue     { int idx; std::string name; };
 struct SetCueTiming  { int idx; float fade_in; float fade_out; float delay_in; float hold; };
+struct MoveCue       { int from_idx; int to_idx; };
 
 // Zone routing commands
 struct SetZone    { Zone zone; };
@@ -336,7 +337,7 @@ using EngineCommand = std::variant<
     cmd::SetFxParam, cmd::SetFxEnabled, cmd::SetFxBypassed, cmd::SetFxWet,
     cmd::TriggerMacro,
     cmd::SetRecordMode, cmd::RecordCue, cmd::UpdateCue,
-    cmd::DeleteCue, cmd::InsertCue, cmd::RenameCue, cmd::SetCueTiming,
+    cmd::DeleteCue, cmd::InsertCue, cmd::RenameCue, cmd::SetCueTiming, cmd::MoveCue,
     cmd::SetZone, cmd::RemoveZone,
     cmd::BamPaint, cmd::BamClear, cmd::BamSetEnabled, cmd::ResetScanFail,
     cmd::SetScanFailEnabled,

@@ -419,6 +419,7 @@ struct Application::Impl {
     // HDMI outputs:  one borderless SDL_Window per id.
     // NDI outputs:   handled entirely inside the engine (no extra UI-side object needed).
     std::unordered_map<int, std::unique_ptr<DacManager>> laser_managers_;
+    std::unordered_map<int, int>                          laser_ordinals_; // stream id → last known laser ordinal
     std::unordered_map<int, SDL_Window*>                  hdmi_windows_;
 
     // ── UI subsystems ─────────────────────────────────────────────────────────
@@ -858,6 +859,23 @@ void Application::Impl::sync_state_from_engine() {
         if (layout_ctx.cuestack_selected_pb >= 0) {
             state.pb_cuelist = engine->read_playback_cuelist(layout_ctx.cuestack_selected_pb);
             state.pb_cuelist_pb_id = layout_ctx.cuestack_selected_pb;
+        }
+    }
+    // Sync state.cues from full_cue_list when sizes differ.
+    // Handles projects that store cues only in full_cue_list, not project->cues,
+    // so the cue sheet panel never shows an empty list for such projects.
+    if (state.full_cue_list.size() != state.cues.size()) {
+        state.cues.clear();
+        for (int i = 0; i < (int)state.full_cue_list.size(); ++i) {
+            const FullCueEntry& fce = state.full_cue_list[i];
+            CueInfo ci;
+            ci.index        = i;
+            ci.name         = fce.name;
+            ci.fade_in      = fce.timing.fade_in;
+            ci.fade_out     = fce.timing.fade_out;
+            ci.trigger_type = (fce.trigger.type == TriggerType::Follow ||
+                               fce.trigger.type == TriggerType::Wait) ? 1 : 0;
+            state.cues.push_back(ci);
         }
     }
     // Load per-playback cuelist when a different PB is selected
@@ -1940,6 +1958,9 @@ void Application::Impl::wire_callbacks() {
     layout_cbs.on_rename_cue = [this](int idx, const std::string& name) {
         engine->send(cmd::RenameCue{idx, name});
     };
+    layout_cbs.on_move_cue = [this](int from_idx, int to_idx) {
+        engine->send(cmd::MoveCue{from_idx, to_idx});
+    };
 
     // Output kill switch
     layout_cbs.on_output_enable = [this](bool enabled) {
@@ -2405,10 +2426,10 @@ void Application::Impl::wire_callbacks() {
             if (cfg.type != OutputStreamType::Laser) continue;
 
             auto it = laser_managers_.find(cfg.id);
+            int ord = laser_ordinal[cfg.id];
             if (it == laser_managers_.end()) {
                 // New laser output — create a DacManager draining the engine bus
                 // that corresponds to this output's positional laser slot.
-                int ord = laser_ordinal[cfg.id];
                 RenderBus* bus = engine->extra_laser_bus(ord);
                 auto mgr = std::make_unique<DacManager>(*bus, ord);
                 // Apply explicit DAC config if provided
@@ -2422,12 +2443,43 @@ void Application::Impl::wire_callbacks() {
                 DacManager* raw = mgr.get();
                 std::thread([raw]{ raw->start(); }).detach();
                 laser_managers_.emplace(cfg.id, std::move(mgr));
+                laser_ordinals_[cfg.id] = ord;
             } else {
-                // Existing manager — apply any updated config
-                if (cfg.dac_type != "auto" && !cfg.dac_type.empty())
-                    it->second->force_dac(cfg.dac_type, cfg.dac_address);
-                if (cfg.point_rate > 0)
-                    it->second->set_point_rate(cfg.point_rate);
+                // Existing manager — check if the bus ordinal changed.
+                // If so, stop the old manager and recreate it on the new bus.
+                int prev_ord = laser_ordinals_.count(cfg.id) ? laser_ordinals_[cfg.id] : ord;
+                if (prev_ord != ord) {
+                    log::info("dac: laser ordinal changed for id=%d (%d->%d), recreating DacManager",
+                              cfg.id, prev_ord, ord);
+                    DacManager* old_raw = it->second.release();
+                    laser_managers_.erase(it);
+                    laser_ordinals_.erase(cfg.id);
+                    dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
+                    std::thread([old_raw, this]() {
+                        old_raw->stop();
+                        delete old_raw;
+                        dacs_stopping_.fetch_sub(1, std::memory_order_release);
+                    }).detach();
+                    // Recreate on the new bus
+                    RenderBus* bus = engine->extra_laser_bus(ord);
+                    auto mgr = std::make_unique<DacManager>(*bus, ord);
+                    if (cfg.dac_type != "auto" && !cfg.dac_type.empty())
+                        mgr->force_dac(cfg.dac_type, cfg.dac_address);
+                    if (cfg.point_rate > 0)
+                        mgr->set_point_rate(cfg.point_rate);
+                    log::info("dac: starting DacManager id=%d type=%s addr=%s pps=%d",
+                              cfg.id, cfg.dac_type.c_str(), cfg.dac_address.c_str(), cfg.point_rate);
+                    DacManager* raw = mgr.get();
+                    std::thread([raw]{ raw->start(); }).detach();
+                    laser_managers_.emplace(cfg.id, std::move(mgr));
+                    laser_ordinals_[cfg.id] = ord;
+                } else {
+                    // Ordinal unchanged — apply any updated config
+                    if (cfg.dac_type != "auto" && !cfg.dac_type.empty())
+                        it->second->force_dac(cfg.dac_type, cfg.dac_address);
+                    if (cfg.point_rate > 0)
+                        it->second->set_point_rate(cfg.point_rate);
+                }
             }
         }
 
@@ -2473,8 +2525,10 @@ void Application::Impl::wire_callbacks() {
                     to_erase.push_back(id);
                 }
             }
-            for (int id : to_erase)
+            for (int id : to_erase) {
                 laser_managers_.erase(id);
+                laser_ordinals_.erase(id);
+            }
         }
 
         // ── 5. Destroy SDL windows for HDMI outputs no longer in the patch ────

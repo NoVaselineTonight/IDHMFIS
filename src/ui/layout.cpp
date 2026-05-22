@@ -3388,6 +3388,7 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
 
             // ── Tab: Cue Sheet ────────────────────────────────────────────────
             if (ImGui::BeginTabItem("Cue Sheet")) {
+                static bool s_move_mode = false;
 
                 // ── Top toolbar ──────────────────────────────────────────────
                 {
@@ -3442,6 +3443,18 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                         if (has_sel && cbs.on_cue_duplicate) cbs.on_cue_duplicate(ctx.cuelist_selected_idx);
                     ImGui::SetItemTooltip("Duplicate the selected cue and insert it after");
                     if (!has_sel) ImGui::EndDisabled();
+
+                    ImGui::SameLine(0, 8);
+                    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+                    ImGui::SameLine(0, 8);
+
+                    if (s_move_mode) ImGui::PushStyleColor(ImGuiCol_Button, theme::kAccent);
+                    if (ImGui::Button(s_move_mode ? "MOVE [ON]" : "MOVE", ImVec2(62.f, 0.f)))
+                        s_move_mode = !s_move_mode;
+                    if (s_move_mode) ImGui::PopStyleColor();
+                    ImGui::SetItemTooltip(s_move_mode
+                        ? "MOVE mode: click a cue to move the selected cue before it"
+                        : "Enable MOVE mode to reorder cues (select a cue first, then click destination)");
 
                     ImGui::SameLine(0, 8);
                     ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
@@ -3609,7 +3622,19 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                         bool row_rclick = ImGui::IsItemHovered()
                                           && ImGui::IsMouseClicked(ImGuiMouseButton_Right);
 
-                        if (state.rem_mode) {
+                        // MOVE mode: click destination cue to move selected cue before it
+                        if (s_move_mode && !state.rem_mode) {
+                            ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(20, 80, 160, 70));
+                            if (row_clicked && ctx.cuelist_selected_idx >= 0 && ctx.cuelist_selected_idx != i) {
+                                if (cbs.on_move_cue) cbs.on_move_cue(ctx.cuelist_selected_idx, i);
+                                ctx.cuelist_selected_idx = i; // track the moved cue's new position
+                                s_move_mode = false;
+                                ImGui::PopID();
+                                break;
+                            }
+                            if (row_clicked) ctx.cuelist_selected_idx = i; // select without moving if same
+                            ImGui::SetItemTooltip("MOVE: click to move selected cue before this cue");
+                        } else if (state.rem_mode) {
                             // REM armed: click deletes the cue
                             if (row_clicked) {
                                 if (cbs.on_delete_cue) cbs.on_delete_cue(i);
@@ -3704,7 +3729,7 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                             ImGui::SetNextItemWidth(-1.f);
                             char di_id[16]; std::snprintf(di_id, sizeof(di_id), "##di%d", i);
                             if (ImGui::DragFloat(di_id, &di, 0.05f, 0.f, 60.f, "%.2f s"))
-                                if (cbs.on_set_cue_timing) cbs.on_set_cue_timing(i, ci.fade_in, ci.fade_out, di, 0.f);
+                                if (cbs.on_set_cue_timing) cbs.on_set_cue_timing(i, ci.fade_in, ci.fade_out, di, (i < 1024) ? s_hld[i] : 0.f);
                             ImGui::SetItemTooltip("Delay before fade-in starts (s) — 0 = immediate");
                         }
 
@@ -3715,7 +3740,7 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                             ImGui::SetNextItemWidth(-1.f);
                             char hld_id[16]; std::snprintf(hld_id, sizeof(hld_id), "##hld%d", i);
                             if (ImGui::DragFloat(hld_id, &hld, 0.05f, 0.f, 600.f, "%.2f s"))
-                                if (cbs.on_set_cue_timing) cbs.on_set_cue_timing(i, ci.fade_in, ci.fade_out, 0.f, hld);
+                                if (cbs.on_set_cue_timing) cbs.on_set_cue_timing(i, ci.fade_in, ci.fade_out, (i < 1024) ? s_di[i] : 0.f, hld);
                             ImGui::SetItemTooltip("Hold time after fade-in before fade-out begins (s)\n0 = trigger-controlled, >0 = auto-advance after this many seconds");
                         }
 
@@ -4109,7 +4134,7 @@ static void generate_premade_shapes(
     // them destroys the radius/turn parameters the user set.  Apply scale directly.
     // For algebraic shapes (Linear, Quadratic, etc.) the output range is undefined,
     // so we still normalise into [-1,1] first.
-    bool is_parametric = (ps.func == FT::Circle || ps.func == FT::Spiral || ps.func == FT::Lissajous || ps.func == FT::Linear);
+    bool is_parametric = (ps.func == FT::Circle || ps.func == FT::Spiral || ps.func == FT::Lissajous);
 
     std::vector<float> nx(N), ny(N);
     if (is_parametric) {

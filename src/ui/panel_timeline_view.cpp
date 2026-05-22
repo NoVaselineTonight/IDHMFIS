@@ -192,12 +192,17 @@ static void draw_timeline_settings_popup(const UIState::TimelineInfo& tl,
     int src_idx = 0;
     if (tl.tc_slot == "CH1") src_idx = 1;
     else if (tl.tc_slot == "CH2") src_idx = 2;
+    // "Internal" and legacy "Default" both map to src_idx=0
 
     ImGui::SetNextItemWidth(120.f);
     if (ImGui::Combo("TC Source", &src_idx, kSrcItems, 3)) {
-        static const char* kSlots[] = { "Default", "CH1", "CH2" };
+        // Use "Internal" (not "Default") so the engine's tc_slot == "Internal" check works
+        static const char* kSlots[] = { "Internal", "CH1", "CH2" };
         if (cbs.on_timeline_set_source)
             cbs.on_timeline_set_source(tl.id, kSlots[src_idx]);
+        // Auto-set link_mode: Internal → true (internal clock), external → false (TC chase)
+        if (cbs.on_timeline_set_link)
+            cbs.on_timeline_set_link(tl.id, (src_idx == 0));
     }
 
     ImGui::Separator();

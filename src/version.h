@@ -1,2 +1,2 @@
 #pragma once
-#define IDHMFIS_VERSION "3.74"
+#define IDHMFIS_VERSION "3.78"

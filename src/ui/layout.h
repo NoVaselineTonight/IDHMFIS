@@ -363,6 +363,7 @@ struct LayoutCallbacks {
     std::function<void(int)>                               on_delete_cue;
     std::function<void(int, float, float, float, float)>   on_set_cue_timing; // idx, fi, fo, di, hold
     std::function<void(int, const std::string&)>           on_rename_cue;
+    std::function<void(int from_idx, int to_idx)>          on_move_cue;
 
     // Output kill switch — fires when user toggles the OUTPUT ENABLE button
     std::function<void(bool)>                              on_output_enable;
