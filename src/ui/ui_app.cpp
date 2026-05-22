@@ -2309,6 +2309,10 @@ void Application::Impl::wire_callbacks() {
         }
     };
 
+    layout_cbs.on_groups_changed = [this]() {
+        state.project_dirty = true;
+    };
+
     // Output patch: full list of stream configs changed by the Patch view.
     // The engine reconciles its output_streams_ list; ui_app reconciles
     // laser_managers_ (one DacManager per Laser output) and hdmi_windows_ (one

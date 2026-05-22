@@ -3060,14 +3060,19 @@ void ShowEngine::build_frame()
     if (need_base)
         points_base = points;
 
+    // Programmer content is kept in a separate buffer so active streams receive
+    // programmer-only frames (programmer always trumps playbacks). The same pts
+    // are appended to `points` so the optimizer, scan-fail sampling, and preview
+    // still see the full composite.
+    PointBuffer programmer_pts_live;
     if (programmer_will_run) {
-        PointBuffer prog_pts = render_keyframe_layer(programmer_objects_,
-                                                      point_rate_ / 4);
-        apply_frame_fx(prog_pts, programmer_fx_layer_, static_cast<float>(fx_time_));
-        apply_global_geometry(prog_pts, programmer_global_layer_);
-        apply_global_layer(prog_pts, programmer_global_layer_,
+        programmer_pts_live = render_keyframe_layer(programmer_objects_,
+                                                    point_rate_ / 4);
+        apply_frame_fx(programmer_pts_live, programmer_fx_layer_, static_cast<float>(fx_time_));
+        apply_global_geometry(programmer_pts_live, programmer_global_layer_);
+        apply_global_layer(programmer_pts_live, programmer_global_layer_,
                            static_cast<float>(fx_time_));
-        for (auto& pt : prog_pts)
+        for (auto& pt : programmer_pts_live)
             points.push_back(pt);
     }
 
@@ -3157,6 +3162,17 @@ void ShowEngine::build_frame()
             for (auto& pt : points_base) pt.blanked = true;
     }
 
+    // Apply same blanking rules to the live programmer frame used by active streams.
+    // scan-fail sampling is covered by safety_.apply(points) above (points includes
+    // programmer content), so we only need the discrete blanking gates here.
+    if (programmer_will_run) {
+        if (!output_enabled_)
+            for (auto& pt : programmer_pts_live) pt.blanked = true;
+        apply_safety_blackout(programmer_pts_live);
+        if (emergency_shutoff_active_)
+            for (auto& pt : programmer_pts_live) pt.blanked = true;
+    }
+
     // Pre-compute per-stream latched programmer frames (cue base + latched programmer).
     // These are used in the fanout for streams that were deselected while the programmer
     // had content — their last programmer state is frozen on them until CLR.
@@ -3239,8 +3255,8 @@ void ShowEngine::build_frame()
                 if (os.config.id == def.id) { rt = &os; break; }
             }
 
-            // Active streams get cue + live programmer.
-            // Non-active streams get their latched frame (if any) or plain cue.
+            // Active streams: programmer trumps — receive programmer-only frame when programmer is running.
+            // Non-active streams get their latched frame (if any) or plain cue+playback composite.
             // No active streams (has_stream_filter=false) → programmer off, all get plain cue.
             const bool in_active_set = has_stream_filter &&
                 std::find(active_stream_ids_.begin(), active_stream_ids_.end(),
@@ -3248,7 +3264,10 @@ void ShowEngine::build_frame()
 
             const PointBuffer* src_ptr;
             if (in_active_set) {
-                src_ptr = &points; // cue + live programmer
+                // Programmer trumps: active streams receive programmer-only frame,
+                // not the cue+playbacks composite. Falls back to full composite when
+                // programmer is not running (no content / no streams selected).
+                src_ptr = programmer_will_run ? &programmer_pts_live : &points;
             } else if (need_base) {
                 auto latch_it = latched_frames.find(def.id);
                 src_ptr = (latch_it != latched_frames.end()) ? &latch_it->second : &points_base;
@@ -3294,8 +3313,17 @@ void ShowEngine::build_frame()
                     const std::vector<Zone>& zlist = zone_manager_.zones();
                     bool used_zone = false;
                     if (lsi < static_cast<int>(zlist.size())) {
-                        if (in_active_set) {
-                            // Active: use pre-routed buffer (cue + live programmer, zone-transformed).
+                        if (in_active_set && programmer_will_run) {
+                            // Programmer trumps: apply zone transform directly to
+                            // programmer-only content so cue/playback is not visible.
+                            const Zone& z = zlist[static_cast<size_t>(lsi)];
+                            if (z.enabled && !z.blind) {
+                                out = zone_manager_.apply_transform(programmer_pts_live, z.transform);
+                                zone_manager_.apply_color(out, z.color_r, z.color_g, z.color_b, z.intensity);
+                                used_zone = true;
+                            }
+                        } else if (in_active_set) {
+                            // Active but programmer not running: use pre-routed zone buffer.
                             auto zit = zone_bufs.find(zlist[static_cast<size_t>(lsi)].id);
                             if (zit != zone_bufs.end()) {
                                 out = zit->second;
@@ -3316,8 +3344,9 @@ void ShowEngine::build_frame()
                 } else {
                     out = src;
                 }
-                // Append playbacks assigned exclusively to this stream
-                {
+                // Append playbacks assigned exclusively to this stream.
+                // Suppressed when the programmer is active on this stream — programmer trumps.
+                if (!(in_active_set && programmer_will_run)) {
                     auto eit = per_stream_extras.find(def.id);
                     if (eit != per_stream_extras.end())
                         for (const auto& pt : eit->second)

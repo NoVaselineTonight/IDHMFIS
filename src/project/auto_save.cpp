@@ -98,7 +98,8 @@ bool AutoSave::tick(const Project& project, const std::string& base_path) {
     }
 
     try {
-        nlohmann::json j = project;
+        nlohmann::json j;
+        idhmfis::to_json(j, project);
         std::string json = j.dump(2);
         if (!write_file(path, json)) {
             log::warn("AutoSave: failed to write %s", path.c_str());

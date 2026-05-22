@@ -1036,33 +1036,44 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
         ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.38f, 0.32f, 0.03f, 1.f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.58f, 0.50f, 0.06f, 1.f));
         if (ImGui::Button("UPDT##sb", ImVec2(item_w, 34.f))) {
+            // Snapshot currently-selected streams before reading programmer_feeds.
+            // feeds_switch_s only saves state on deselect, so the active stream's
+            // current edits are in frame_editor but not yet in programmer_feeds.
+            for (int sid : state.active_stream_ids) {
+                if (!ctx.frame_editor.objects.empty() || !ctx.programmer_fx_layer.fx.empty()) {
+                    auto& feed = ctx.programmer_feeds[std::to_string(sid)];
+                    feed.objects = ctx.frame_editor.objects;
+                    feed.fx      = ctx.programmer_fx_layer;
+                    feed.global  = ctx.programmer_global;
+                }
+            }
             if (ctx.included_pb_id >= 0 && ctx.included_pb_cue_idx >= 0) {
                 // Update a playback cue
                 FullCueEntry fce;
                 if (state.pb_cuelist_pb_id == ctx.included_pb_id &&
                     ctx.included_pb_cue_idx < (int)state.pb_cuelist.size())
                     fce = state.pb_cuelist[ctx.included_pb_cue_idx];
-                fce.keyframe_layer.objects       = ctx.frame_editor.objects;
+                // Monolithic keyframe is intentionally left empty: all content
+                // is stored per-stream so the engine only activates programmed streams.
+                fce.keyframe_layer.objects       = {};
                 fce.keyframe_layer.symmetry_mode = static_cast<int>(ctx.frame_editor.symmetry);
                 fce.global_layer = ctx.programmer_global;
                 fce.fx_layer     = ctx.programmer_fx_layer;
                 fce.per_stream_fx.clear();
                 fce.per_stream_kf.clear();
-                for (const auto& [key, feed] : ctx.programmer_feeds) {
-                    try {
-                        int sid = std::stoi(key);
-                        fce.per_stream_fx[sid] = feed.fx;
-                    } catch (...) {}
-                }
-                for (const auto& [key, feed] : ctx.programmer_feeds) {
-                    try {
-                        int sid = std::stoi(key);
-                        if (!feed.objects.empty()) {
-                            KeyframeLayer kf;
-                            kf.objects = feed.objects;
-                            fce.per_stream_kf[sid] = kf;
-                        }
-                    } catch (...) {}
+                // Only store entries for the currently-active streams.
+                // Stale programmer_feeds from other streams are intentionally excluded
+                // so a cue recorded for a group does not activate unselected streams.
+                for (int sid : state.active_stream_ids) {
+                    auto it = ctx.programmer_feeds.find(std::to_string(sid));
+                    if (it == ctx.programmer_feeds.end()) continue;
+                    const auto& feed = it->second;
+                    fce.per_stream_fx[sid] = feed.fx;
+                    if (!feed.objects.empty()) {
+                        KeyframeLayer kf;
+                        kf.objects = feed.objects;
+                        fce.per_stream_kf[sid] = kf;
+                    }
                 }
                 if (cbs.on_playback_cue_update)
                     cbs.on_playback_cue_update(ctx.included_pb_id, ctx.included_pb_cue_idx, fce);
@@ -1073,27 +1084,22 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
                 FullCueEntry fce;
                 if (ctx.included_cue_idx < (int)state.full_cue_list.size())
                     fce = state.full_cue_list[ctx.included_cue_idx];
-                fce.keyframe_layer.objects       = ctx.frame_editor.objects;
+                fce.keyframe_layer.objects       = {};
                 fce.keyframe_layer.symmetry_mode = static_cast<int>(ctx.frame_editor.symmetry);
                 fce.global_layer = ctx.programmer_global;
                 fce.fx_layer     = ctx.programmer_fx_layer;
                 fce.per_stream_fx.clear();
                 fce.per_stream_kf.clear();
-                for (const auto& [key, feed] : ctx.programmer_feeds) {
-                    try {
-                        int sid = std::stoi(key);
-                        fce.per_stream_fx[sid] = feed.fx;
-                    } catch (...) {}
-                }
-                for (const auto& [key, feed] : ctx.programmer_feeds) {
-                    try {
-                        int sid = std::stoi(key);
-                        if (!feed.objects.empty()) {
-                            KeyframeLayer kf;
-                            kf.objects = feed.objects;
-                            fce.per_stream_kf[sid] = kf;
-                        }
-                    } catch (...) {}
+                for (int sid : state.active_stream_ids) {
+                    auto it = ctx.programmer_feeds.find(std::to_string(sid));
+                    if (it == ctx.programmer_feeds.end()) continue;
+                    const auto& feed = it->second;
+                    fce.per_stream_fx[sid] = feed.fx;
+                    if (!feed.objects.empty()) {
+                        KeyframeLayer kf;
+                        kf.objects = feed.objects;
+                        fce.per_stream_kf[sid] = kf;
+                    }
                 }
                 if (cbs.on_cuelist_update_entry)
                     cbs.on_cuelist_update_entry(ctx.included_cue_idx, fce);
@@ -1422,11 +1428,22 @@ void panel_cue_library(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs)
                             ctx.frame_editor.objects = fce.keyframe_layer.objects;
                         ctx.programmer_global    = fce.global_layer;
                         ctx.programmer_fx_layer  = fce.fx_layer;
-                        // Restore per-stream FX into programmer_feeds so streams
-                        // that had per-head FX overrides get them back correctly.
                         for (const auto& [sid, sfx] : fce.per_stream_fx) {
                             auto& feed = ctx.programmer_feeds[std::to_string(sid)];
                             feed.fx = sfx;
+                        }
+                        // Restore per-stream keyframe objects so each head's drawing
+                        // is available when the operator switches stream selection.
+                        for (const auto& [sid, kf] : fce.per_stream_kf) {
+                            auto& feed = ctx.programmer_feeds[std::to_string(sid)];
+                            feed.objects = kf.objects;
+                        }
+                        // Show the currently-selected stream's content in the editor,
+                        // not the monolithic fallback keyframe.
+                        if (!state.active_stream_ids.empty()) {
+                            auto it = fce.per_stream_kf.find(state.active_stream_ids[0]);
+                            if (it != fce.per_stream_kf.end() && !it->second.objects.empty())
+                                ctx.frame_editor.objects = it->second.objects;
                         }
                     }
                     if (cbs.on_include_cue) cbs.on_include_cue(idx);
@@ -2994,6 +3011,15 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                         for (const auto& [sid, sfx] : fce.per_stream_fx) {
                             auto& feed = ctx.programmer_feeds[std::to_string(sid)];
                             feed.fx = sfx;
+                        }
+                        for (const auto& [sid, kf] : fce.per_stream_kf) {
+                            auto& feed = ctx.programmer_feeds[std::to_string(sid)];
+                            feed.objects = kf.objects;
+                        }
+                        if (!state.active_stream_ids.empty()) {
+                            auto it = fce.per_stream_kf.find(state.active_stream_ids[0]);
+                            if (it != fce.per_stream_kf.end() && !it->second.objects.empty())
+                                ctx.frame_editor.objects = it->second.objects;
                         }
                         if (cbs.on_include_playback_cue)
                             cbs.on_include_playback_cue(pb_id, ci);
@@ -7806,16 +7832,13 @@ static void draw_show_view_grid(UIState& state, LayoutContext& ctx, LayoutCallba
             if (rec_go && cbs.on_record_frame_to_playback) {
                 FullCueEntry fce;
                 fce.name = "Cue " + std::to_string(pb.id);
-                fce.keyframe_layer.objects       = ctx.frame_editor.objects;
+                fce.keyframe_layer.objects       = {};
                 fce.keyframe_layer.symmetry_mode = static_cast<int>(ctx.frame_editor.symmetry);
                 fce.global_layer = ctx.programmer_global;
                 fce.fx_layer     = ctx.programmer_fx_layer;
                 fce.trigger.type = TriggerType::Follow;
                 fce.timing.hold  = 2.f;
-                // Snapshot currently-selected streams into programmer_feeds before reading.
-                // feeds_switch_s only saves state on deselect, so the stream currently in
-                // the programmer hasn't been written yet. We capture it here so a single
-                // REC press records every programmed head simultaneously.
+                // Snapshot currently-active streams into programmer_feeds first.
                 for (int sid : state.active_stream_ids) {
                     if (!ctx.frame_editor.objects.empty() || !ctx.programmer_fx_layer.fx.empty()) {
                         auto& feed = ctx.programmer_feeds[std::to_string(sid)];
@@ -7824,27 +7847,19 @@ static void draw_show_view_grid(UIState& state, LayoutContext& ctx, LayoutCallba
                         feed.global  = ctx.programmer_global;
                     }
                 }
-                // Populate per-stream FX from saved programmer feeds.
-                // Only require that the feed has FX — objects may be empty if a stream
-                // was selected purely for FX programming.
-                for (const auto& [key, feed] : ctx.programmer_feeds) {
-                    if (!feed.fx.fx.empty()) {
-                        try {
-                            int sid = std::stoi(key);
-                            fce.per_stream_fx[sid] = feed.fx;
-                        } catch (...) { /* skip combo keys like "1,2" */ }
+                // Store per-stream entries ONLY for currently-active streams.
+                // Stale programmer_feeds from other streams are excluded so a cue
+                // recorded for a group does not activate unselected streams.
+                for (int sid : state.active_stream_ids) {
+                    auto it = ctx.programmer_feeds.find(std::to_string(sid));
+                    if (it == ctx.programmer_feeds.end()) continue;
+                    const auto& feed = it->second;
+                    fce.per_stream_fx[sid] = feed.fx;
+                    if (!feed.objects.empty()) {
+                        KeyframeLayer kf;
+                        kf.objects = feed.objects;
+                        fce.per_stream_kf[sid] = kf;
                     }
-                }
-                // Save per-stream keyframe layers for multi-head programming
-                for (const auto& [key, feed] : ctx.programmer_feeds) {
-                    try {
-                        int sid = std::stoi(key);
-                        if (!feed.objects.empty()) {
-                            KeyframeLayer kf;
-                            kf.objects = feed.objects;
-                            fce.per_stream_kf[sid] = kf;
-                        }
-                    } catch (...) {}
                 }
                 cbs.on_record_frame_to_playback(pb.id, fce);
                 ctx.rec_armed = false;
@@ -8118,16 +8133,12 @@ void panel_playback_bar(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
             if (rec_armed_slot && cbs.on_record_frame_to_playback) {
                 FullCueEntry fce;
                 fce.name = "Cue " + std::to_string(pb.id);
-                fce.keyframe_layer.objects       = ctx.frame_editor.objects;
+                fce.keyframe_layer.objects       = {};
                 fce.keyframe_layer.symmetry_mode = static_cast<int>(ctx.frame_editor.symmetry);
                 fce.global_layer = ctx.programmer_global;
                 fce.fx_layer     = ctx.programmer_fx_layer;
                 fce.trigger.type = TriggerType::Follow;
                 fce.timing.hold  = 2.f;
-                // Snapshot currently-selected streams into programmer_feeds before reading.
-                // feeds_switch_s only saves state on deselect, so the stream currently in
-                // the programmer hasn't been written yet. We capture it here so a single
-                // REC press records every programmed head simultaneously.
                 for (int sid : state.active_stream_ids) {
                     if (!ctx.frame_editor.objects.empty() || !ctx.programmer_fx_layer.fx.empty()) {
                         auto& feed = ctx.programmer_feeds[std::to_string(sid)];
@@ -8136,27 +8147,16 @@ void panel_playback_bar(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
                         feed.global  = ctx.programmer_global;
                     }
                 }
-                // Populate per-stream FX from saved programmer feeds.
-                // Only require that the feed has FX — objects may be empty if a stream
-                // was selected purely for FX programming.
-                for (const auto& [key, feed] : ctx.programmer_feeds) {
-                    if (!feed.fx.fx.empty()) {
-                        try {
-                            int sid = std::stoi(key);
-                            fce.per_stream_fx[sid] = feed.fx;
-                        } catch (...) { /* skip combo keys like "1,2" */ }
+                for (int sid : state.active_stream_ids) {
+                    auto it = ctx.programmer_feeds.find(std::to_string(sid));
+                    if (it == ctx.programmer_feeds.end()) continue;
+                    const auto& feed = it->second;
+                    fce.per_stream_fx[sid] = feed.fx;
+                    if (!feed.objects.empty()) {
+                        KeyframeLayer kf;
+                        kf.objects = feed.objects;
+                        fce.per_stream_kf[sid] = kf;
                     }
-                }
-                // Save per-stream keyframe layers for multi-head programming
-                for (const auto& [key, feed] : ctx.programmer_feeds) {
-                    try {
-                        int sid = std::stoi(key);
-                        if (!feed.objects.empty()) {
-                            KeyframeLayer kf;
-                            kf.objects = feed.objects;
-                            fce.per_stream_kf[sid] = kf;
-                        }
-                    } catch (...) {}
                 }
                 cbs.on_record_frame_to_playback(pb.id, fce);
                 ctx.rec_armed = false;

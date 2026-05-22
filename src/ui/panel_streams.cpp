@@ -552,6 +552,7 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                                            return g.id == slot;
                                        }),
                         state.output_groups.end());
+                    if (cbs.on_groups_changed) cbs.on_groups_changed();
                     state.rem_mode = false;
                     // iterator invalidated — must break out of the slot loop
                     break;
@@ -625,6 +626,7 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                                                return g.id == slot;
                                            }),
                             state.output_groups.end());
+                        if (cbs.on_groups_changed) cbs.on_groups_changed();
                         ImGui::EndPopup();
                         break;  // iterator invalidated
                     }
@@ -726,6 +728,7 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                         grp.mirrored_ids.push_back(state.active_stream_ids[static_cast<size_t>(mi)]);
             }
             state.output_groups.push_back(grp);
+            if (cbs.on_groups_changed) cbs.on_groups_changed();
             // Don't advance output_group_next_id since we use slot as id
 
             // Head-based recording: snapshot programmer state for these outputs

@@ -698,27 +698,6 @@ void panel_patch(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
         ImGui::PopStyleColor(3);
         ImGui::SetItemTooltip("Add multiple outputs of the same type at once.");
 
-        ImGui::SameLine(0, 6.0f);
-
-        // MOVE toggle — enables drag-and-drop reordering of the output list.
-        // Ordinal position in the list determines bus index, so reordering
-        // also changes which physical DAC each laser maps to.
-        {
-            bool mov = ctx.patch_move_mode;
-            ImGui::PushStyleColor(ImGuiCol_Button,
-                mov ? ImVec4(0.10f, 0.40f, 0.75f, 1.f)
-                    : ImVec4(0.12f, 0.20f, 0.35f, 1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                mov ? ImVec4(0.15f, 0.52f, 0.90f, 1.f)
-                    : ImVec4(0.18f, 0.30f, 0.52f, 1.f));
-            if (ImGui::Button("MOVE##patch_mov"))
-                ctx.patch_move_mode = !mov;
-            ImGui::PopStyleColor(2);
-            ImGui::SetItemTooltip(mov
-                ? "MOVE mode ON — drag rows to reorder outputs. Click to exit."
-                : "MOVE: drag rows to reorder outputs (changes bus/DAC ordinal).");
-        }
-
         // Column header underline in accent color
         {
             ImVec2 p0 = ImGui::GetCursorScreenPos();
@@ -861,7 +840,7 @@ void panel_patch(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
             ImGui::SameLine(0, 6.0f);
 
             // In MOVE mode show a drag-handle glyph so the row looks draggable
-            if (ctx.patch_move_mode) {
+            if (ctx.stream_move_mode) {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.6f, 0.9f, 1.f));
                 ImGui::TextUnformatted(":::");
                 ImGui::PopStyleColor();
@@ -880,13 +859,13 @@ void panel_patch(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                 if (state.rem_mode) {
                     remove_id = po.id;
                     state.rem_mode = false;
-                } else if (!ctx.patch_move_mode) {
+                } else if (!ctx.stream_move_mode) {
                     ctx.patch_selected_id = po.id;
                 }
             }
 
             // Drag-and-drop reordering when MOVE mode is active
-            if (ctx.patch_move_mode) {
+            if (ctx.stream_move_mode) {
                 if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
                     ImGui::SetDragDropPayload("PATCH_ROW", &i, sizeof(int));
                     ImGui::Text("[%s] %s", stream_type_label(po.type), po.name.c_str());
@@ -923,7 +902,7 @@ void panel_patch(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
             const int cur_id = po.id;
 
             // Context menu: Duplicate, Remove (suppressed in MOVE mode)
-            if (!ctx.patch_move_mode && ImGui::BeginPopupContextItem("##po_ctx")) {
+            if (!ctx.stream_move_mode && ImGui::BeginPopupContextItem("##po_ctx")) {
                 if (ImGui::MenuItem("Duplicate")) {
                     UIState::PatchedOutput copy = po;  // copy before insert
                     copy.id = ctx.patch_next_id++;

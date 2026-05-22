@@ -472,6 +472,9 @@ struct LayoutCallbacks {
     // Network configuration applied — full config snapshot
     std::function<void(const UIState::NetworkConfig&)> on_network_config_apply;
 
+    // Output groups changed (group created / deleted)
+    std::function<void()> on_groups_changed;
+
     // Output patch changed — full list of current patch configs
     std::function<void(const std::vector<OutputStreamConfig>&)> on_output_patch_changed;
     // Active stream selection changed (which streams programmer targets)
@@ -643,11 +646,8 @@ struct LayoutContext {
     // selected for programmer output.  Empty = all outputs receive programmer.
     bool streams_window_open = true;
 
-    // MOVE mode for streams grid — drag-and-drop reorder of output cells
+    // MOVE mode — drag-and-drop reorder of output cells (streams grid and patch panel)
     bool stream_move_mode = false;
-
-    // MOVE mode for patch panel — drag-and-drop reorder of patched outputs
-    bool patch_move_mode = false;
 
     // ── New floating panels ───────────────────────────────────────────────────
     bool clock_open       = false;
