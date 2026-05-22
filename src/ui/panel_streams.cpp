@@ -418,11 +418,11 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
     // Always shows kGroupSlotCount slots. Occupied = named group. Empty = dashed.
     // REC mode: click any slot (empty OR occupied) → record/overwrite group.
     {
-        // Groups grid uses the same column count as the output grid
+        // Groups grid uses the same column count and cell height as the output grid
         const int grp_cols = s_grid_cols;
         const float gw = (avail_w - cell_gap * (static_cast<float>(grp_cols) - 1.f))
                          / static_cast<float>(grp_cols);
-        const float gh = 34.f;
+        const float gh = cell_h;
 
         // Section label
         if (ctx.rec_armed) {
@@ -672,6 +672,145 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
         ImGui::TextDisabled("%d output(s) selected",
                             static_cast<int>(state.active_stream_ids.size()));
     }
+
+    // ── AUTO GROUPS ───────────────────────────────────────────────────────────
+    // Generates groups automatically from the current output layout.
+    {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        static bool s_auto_expanded = false;
+        if (ImGui::SmallButton(s_auto_expanded ? "v AUTO GROUPS" : "> AUTO GROUPS"))
+            s_auto_expanded = !s_auto_expanded;
+
+        if (s_auto_expanded) {
+            ImGui::Spacing();
+            static int s_auto_mode = 0;  // 0=Odd/Even, 1=Centre Out
+            ImGui::SetNextItemWidth(180.f);
+            ImGui::Combo("Mode##ag_mode", &s_auto_mode, "Odd / Even\0Centre Out\0");
+            ImGui::SetItemTooltip(
+                "Odd/Even: split outputs by 1-based position parity.\n"
+                "Centre Out: pair outputs symmetrically inward; outer pairs = group A, inner = group B.");
+
+            ImGui::Spacing();
+            // Find the first N free slots (starting from 0) to place the 4 generated groups
+            auto find_free_slots = [&](int count) -> std::vector<int> {
+                std::vector<int> slots;
+                for (int s2 = 0; s2 < kGroupSlotCount && (int)slots.size() < count; ++s2) {
+                    bool occupied = false;
+                    for (const auto& g : state.output_groups)
+                        if (g.id == s2) { occupied = true; break; }
+                    if (!occupied) slots.push_back(s2);
+                }
+                return slots;
+            };
+
+            // Collect enabled outputs in display order (s_cell_order)
+            auto get_ordered_outputs = [&]() -> std::vector<int> {
+                std::vector<int> ids;
+                for (int cid : s_cell_order) {
+                    if (cid < 0) continue;
+                    for (const auto& po : state.patched_outputs)
+                        if (po.id == cid && po.enabled) { ids.push_back(cid); break; }
+                }
+                return ids;
+            };
+
+            if (ImGui::Button("Generate Groups##ag_gen")) {
+                std::vector<int> ordered = get_ordered_outputs();
+                int N = static_cast<int>(ordered.size());
+                if (N >= 2) {
+                    std::vector<int> groupA, groupB;
+
+                    if (s_auto_mode == 0) {
+                        // Odd/Even by 1-based position
+                        for (int i = 0; i < N; ++i) {
+                            if ((i % 2) == 0) groupA.push_back(ordered[i]);  // 1st, 3rd, ... (odd)
+                            else              groupB.push_back(ordered[i]);  // 2nd, 4th, ... (even)
+                        }
+                    } else {
+                        // Centre Out: alternate pairs inward from outside
+                        // Pair (0,N-1), (1,N-2), ... → alternate pairs into A and B
+                        int half = N / 2;
+                        for (int p = 0; p < half; ++p) {
+                            int left  = ordered[p];
+                            int right = ordered[N - 1 - p];
+                            if ((p % 2) == 0) { groupA.push_back(left); groupA.push_back(right); }
+                            else              { groupB.push_back(left); groupB.push_back(right); }
+                        }
+                        if (N % 2 == 1) groupB.push_back(ordered[half]); // odd centre element → B
+                    }
+
+                    // Right half = outputs in the upper half of display order (used for mirroring)
+                    std::vector<int> right_half;
+                    for (int i = N / 2; i < N; ++i)
+                        right_half.push_back(ordered[i]);
+
+                    auto intersect = [](const std::vector<int>& a, const std::vector<int>& b) {
+                        std::vector<int> out;
+                        for (int x : a)
+                            if (std::find(b.begin(), b.end(), x) != b.end())
+                                out.push_back(x);
+                        return out;
+                    };
+
+                    // Generate 4 groups: A normal, A mirrored, B normal, B mirrored
+                    // (or 2 if only one group has members)
+                    struct GenGroup { std::vector<int> members; std::vector<int> mirrored; std::string suffix; };
+                    std::vector<GenGroup> gg;
+                    if (!groupA.empty()) {
+                        gg.push_back({ groupA, {},                     "(Odd)"    });
+                        gg.push_back({ groupA, intersect(groupA, right_half), "(Odd Mirror)"   });
+                    }
+                    if (!groupB.empty()) {
+                        gg.push_back({ groupB, {},                     "(Even)"   });
+                        gg.push_back({ groupB, intersect(groupB, right_half), "(Even Mirror)"  });
+                    }
+                    if (s_auto_mode == 1) {
+                        // Rename to Outer/Inner for Centre Out mode
+                        const char* names[] = { "(Outer)", "(Outer Mirror)", "(Inner)", "(Inner Mirror)" };
+                        for (size_t gi = 0; gi < gg.size() && gi < 4; ++gi)
+                            gg[gi].suffix = names[gi];
+                    }
+
+                    // Find enough free slots
+                    std::vector<int> free_slots = find_free_slots(static_cast<int>(gg.size()));
+                    int placed = std::min((int)gg.size(), (int)free_slots.size());
+
+                    for (int gi = 0; gi < placed; ++gi) {
+                        // Remove any existing group in the target slot
+                        state.output_groups.erase(
+                            std::remove_if(state.output_groups.begin(), state.output_groups.end(),
+                                [&](const UIState::OutputGroup& g) { return g.id == free_slots[gi]; }),
+                            state.output_groups.end());
+
+                        UIState::OutputGroup ng;
+                        ng.id           = free_slots[gi];
+                        ng.name         = (s_auto_mode == 0 ? "Auto" : "Sym") + gg[gi].suffix;
+                        ng.member_ids   = gg[gi].members;
+                        ng.mirrored_ids = gg[gi].mirrored;
+                        state.output_groups.push_back(std::move(ng));
+                    }
+                    if (placed > 0 && cbs.on_groups_changed)
+                        cbs.on_groups_changed();
+                } else {
+                    ImGui::OpenPopup("##ag_need2");
+                }
+            }
+            if (ImGui::BeginPopup("##ag_need2")) {
+                ImGui::TextDisabled("Need at least 2 outputs to generate groups.");
+                ImGui::EndPopup();
+            }
+            ImGui::SetItemTooltip(
+                "Generates 4 groups (normal + mirrored variants) into the first available slots.\n"
+                "Mirror variant: right-side outputs receive X-flipped output.");
+        }
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
 
     // ── Record Group modal ────────────────────────────────────────────────────
     ImGui::SetNextWindowSize(ImVec2(320.f, 0.f), ImGuiCond_Always);

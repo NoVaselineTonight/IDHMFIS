@@ -408,6 +408,9 @@ struct FullCueEntry {
     // Streams absent from this map fall back to keyframe_layer (the global default).
     std::unordered_map<int, KeyframeLayer> per_stream_kf;
 
+    // Streams that receive X-flipped output when this cue plays back (recorded from group mirroring).
+    std::vector<int> mirrored_ids;
+
     // Sparse map: param_name -> override value for this cue.
     // Empty means pure tracking cue (no parameter changes).
     std::vector<std::pair<std::string, float>> param_overrides;

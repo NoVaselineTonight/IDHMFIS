@@ -50,6 +50,9 @@ public:
     // Caller must NOT cache this beyond one output cycle.
     IDac* active_dac() const;
 
+    // True if both background threads are running (set by start(), cleared by stop()).
+    bool is_running() const { return running_.load(std::memory_order_acquire); }
+
     // Change the output point rate across all candidates.
     void set_point_rate(int pps);
 

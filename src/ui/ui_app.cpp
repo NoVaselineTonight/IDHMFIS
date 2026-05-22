@@ -470,6 +470,7 @@ struct Application::Impl {
     void sync_state_from_engine();       // called each frame: snapshot -> UIState
     void do_load_project(const std::string& path); // blocking project load + state restore
     void do_new_project();                          // reset all state to a fresh empty project
+    void check_output_health();                     // periodic: verify patched lasers have running managers
 
     // ── Callback wiring ───────────────────────────────────────────────────────
     void wire_callbacks();
@@ -1213,13 +1214,19 @@ void Application::Impl::do_new_project() {
     for (int i = 0; i < UIState::kMaxPlaybacks; ++i)
         state.snap.playbacks[i] = {};
 
-    // Reset layout programmer state
+    // Reset layout programmer state — fully zero the programmer so the new show starts clean
     layout_ctx.frame_editor.objects.clear();
     layout_ctx.programmer_feeds.clear();
-    layout_ctx.incl_armed          = false;
-    layout_ctx.included_cue_idx    = -1;
-    layout_ctx.included_pb_id      = -1;
-    layout_ctx.included_pb_cue_idx = -1;
+    layout_ctx.programmer_global    = {};
+    layout_ctx.programmer_fx_layer  = {};
+    layout_ctx.programmer_undo_stack.clear();
+    layout_ctx.incl_armed           = false;
+    layout_ctx.rec_armed            = false;
+    layout_ctx.included_cue_idx     = -1;
+    layout_ctx.included_pb_id       = -1;
+    layout_ctx.included_pb_cue_idx  = -1;
+    state.active_group_id           = -1;
+    state.active_mirrored_stream_ids.clear();
 
     // Force dockspace/layout rebuild on next frame
     layout_ctx.dockspace_initialised   = false;
@@ -1246,6 +1253,36 @@ void Application::Impl::do_new_project() {
     state.active_stream_ids.clear();
 
     log::info("do_new_project: blank show created");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  check_output_health — background reconcile: every patched laser should have
+//  a running DacManager draining the correct bus.  If one is missing or stopped,
+//  re-trigger on_output_patch_changed so the manager is recreated.
+// ─────────────────────────────────────────────────────────────────────────────
+void Application::Impl::check_output_health() {
+    if (dacs_stopping_.load(std::memory_order_acquire) > 0) return;  // patch change in flight
+    if (state.patched_outputs.empty()) return;
+
+    bool needs_repair = false;
+    for (const auto& po : state.patched_outputs) {
+        if (po.type != OutputStreamType::Laser || !po.enabled) continue;
+        auto it = laser_managers_.find(po.id);
+        if (it == laser_managers_.end() || !it->second->is_running()) {
+            needs_repair = true;
+            break;
+        }
+    }
+
+    if (needs_repair) {
+        log::warn("output_health: manager missing or stopped — re-applying patch");
+        std::vector<OutputStreamConfig> cfgs;
+        cfgs.reserve(state.patched_outputs.size());
+        for (const auto& po : state.patched_outputs)
+            cfgs.push_back(po.config);
+        if (layout_cbs.on_output_patch_changed)
+            layout_cbs.on_output_patch_changed(cfgs);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2533,6 +2570,7 @@ void Application::Impl::wire_callbacks() {
     };
     layout_cbs.on_mirrored_streams_changed = [this](const std::vector<int>& ids) {
         engine->send(cmd::SetMirroredStreams{ ids });
+        state.active_mirrored_stream_ids = ids;
     };
 
     // ── Timeline callbacks ────────────────────────────────────────────────────
@@ -3518,6 +3556,16 @@ void Application::Impl::run_frame() {
 
     // DAC connection status (will come from real subsystems later)
     state.dac_connected = false;
+
+    // ── Output health check — every 5 seconds ──────────────────────────────────
+    {
+        static Uint64 s_last_health_ms = 0;
+        Uint64 now = SDL_GetTicks();
+        if (now - s_last_health_ms >= 5000u) {
+            s_last_health_ms = now;
+            check_output_health();
+        }
+    }
 
 #if defined(_WIN32)
     UINT frame_idx = dx12.frame_index;

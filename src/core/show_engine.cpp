@@ -2910,6 +2910,9 @@ void ShowEngine::build_frame()
                     apply_frame_fx(stream_pts, stream_fx, fx_t);
                     apply_global_geometry(stream_pts, fce.global_layer);
                     apply_global_layer(stream_pts, fce.global_layer, fx_t, pb_intensity, gfx_smooth_);
+                    if (!fce.mirrored_ids.empty() &&
+                        std::find(fce.mirrored_ids.begin(), fce.mirrored_ids.end(), sid) != fce.mirrored_ids.end())
+                        for (auto& pt : stream_pts) pt.x = -pt.x;
                     for (const auto& pt : stream_pts)
                         per_stream_extras[sid].push_back(pt);
                 }
@@ -3024,6 +3027,9 @@ void ShowEngine::build_frame()
                     apply_frame_fx(stream_pts, stream_fx, fx_t);
                     apply_global_geometry(stream_pts, fce.global_layer);
                     apply_global_layer(stream_pts, fce.global_layer, fx_t, pb_intensity, gfx_smooth_);
+                    if (!fce.mirrored_ids.empty() &&
+                        std::find(fce.mirrored_ids.begin(), fce.mirrored_ids.end(), sid) != fce.mirrored_ids.end())
+                        for (auto& pt : stream_pts) pt.x = -pt.x;
                     for (const auto& pt : stream_pts)
                         per_stream_extras[sid].push_back(pt);
                 }

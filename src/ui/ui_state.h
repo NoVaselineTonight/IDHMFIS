@@ -450,7 +450,8 @@ struct UIState {
         OutputStreamConfig  config;
     };
     std::vector<PatchedOutput> patched_outputs;
-    std::vector<int>           active_stream_ids;  // which streams programmer edits go to
+    std::vector<int>           active_stream_ids;          // which streams programmer edits go to
+    std::vector<int>           active_mirrored_stream_ids; // subset receiving X-flipped programmer output
 
     // Output groups — recorded via REC + click empty cell in the STREAMS grid
     struct OutputGroup {

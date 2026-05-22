@@ -26,12 +26,25 @@ namespace idhmfis {
 //  Timing display helper — "Xs / YY.Y BPM" dual format
 // ─────────────────────────────────────────────────────────────────────────────
 static bool DragTimingFloat(const char* label, float* v, float speed,
-                             float min_v, float max_v, float /*bpm*/ = 0.f)
+                             float min_v, float max_v, float bpm = 0.f)
 {
     bool changed = ImGui::DragFloat(label, v, speed, min_v, max_v, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
     if (ImGui::IsItemHovered() && *v > 0.001f) {
         float equiv_bpm = 60.f / *v;
-        ImGui::SetTooltip("%.2f s  (%.1f BPM)", *v, equiv_bpm);
+        if (bpm > 0.f) {
+            float beats = (*v) * bpm / 60.f;
+            ImGui::SetTooltip("%.2f s  |  %.1f BPM equiv  |  %.2f beats @%.0f BPM", *v, equiv_bpm, beats, bpm);
+        } else {
+            ImGui::SetTooltip("%.2f s  (%.1f BPM equiv)", *v, equiv_bpm);
+        }
+    }
+    // Show beat count as secondary dim text when BPM is known and value is non-trivial
+    if (bpm > 0.f && *v > 0.001f) {
+        float beats = (*v) * bpm / 60.f;
+        char bpm_buf[24];
+        std::snprintf(bpm_buf, sizeof(bpm_buf), "%.2f bt", beats);
+        ImGui::SameLine(0.f, 4.f);
+        ImGui::TextDisabled("%s", bpm_buf);
     }
     return changed;
 }
@@ -1075,6 +1088,7 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
                         fce.per_stream_kf[sid] = kf;
                     }
                 }
+                fce.mirrored_ids = state.active_mirrored_stream_ids;
                 if (cbs.on_playback_cue_update)
                     cbs.on_playback_cue_update(ctx.included_pb_id, ctx.included_pb_cue_idx, fce);
                 ctx.included_pb_id      = -1;
@@ -1101,6 +1115,7 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
                         fce.per_stream_kf[sid] = kf;
                     }
                 }
+                fce.mirrored_ids = state.active_mirrored_stream_ids;
                 if (cbs.on_cuelist_update_entry)
                     cbs.on_cuelist_update_entry(ctx.included_cue_idx, fce);
                 ctx.included_cue_idx = -1;
@@ -2950,17 +2965,70 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                                  ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
                                  ImGuiTableFlags_SizingStretchProp;
 
+        // "Set All" popup — opened by double-clicking a timing column header
+        static int   s_set_all_col  = -1;   // 2=FadeIn, 3=Hold, 4=FadeOut, 5=Wait
+        static float s_set_all_val  = 0.f;
+        static bool  s_set_all_open = false;
+
         if (ImGui::BeginTable("##cstable", 8, tflags)) {
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableSetupColumn("#",        ImGuiTableColumnFlags_WidthFixed,   28.f);
             ImGui::TableSetupColumn("Name",     ImGuiTableColumnFlags_WidthStretch, 3.f);
-            ImGui::TableSetupColumn("Fade In",  ImGuiTableColumnFlags_WidthStretch, 2.f);
-            ImGui::TableSetupColumn("Hold",     ImGuiTableColumnFlags_WidthStretch, 2.f);
-            ImGui::TableSetupColumn("Fade Out", ImGuiTableColumnFlags_WidthStretch, 2.f);
-            ImGui::TableSetupColumn("Wait",     ImGuiTableColumnFlags_WidthStretch, 2.f);
+            ImGui::TableSetupColumn("Fade In (dbl-click=set all)",  ImGuiTableColumnFlags_WidthStretch, 2.f);
+            ImGui::TableSetupColumn("Hold (dbl-click=set all)",     ImGuiTableColumnFlags_WidthStretch, 2.f);
+            ImGui::TableSetupColumn("Fade Out (dbl-click=set all)", ImGuiTableColumnFlags_WidthStretch, 2.f);
+            ImGui::TableSetupColumn("Wait (dbl-click=set all)",     ImGuiTableColumnFlags_WidthStretch, 2.f);
             ImGui::TableSetupColumn("Trig",     ImGuiTableColumnFlags_WidthFixed,   50.f);
             ImGui::TableSetupColumn("",         ImGuiTableColumnFlags_WidthFixed,   36.f);
-            ImGui::TableHeadersRow();
+
+            // Custom header row with double-click detection on timing columns
+            ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+            for (int col = 0; col < 8; ++col) {
+                ImGui::TableSetColumnIndex(col);
+                ImGui::TableHeader(ImGui::TableGetColumnName(col));
+                // Detect double-click on timing columns (2=FadeIn, 3=Hold, 4=FadeOut, 5=Wait)
+                if (col >= 2 && col <= 5 && ImGui::IsItemHovered() &&
+                    ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    s_set_all_col  = col;
+                    s_set_all_val  = 0.f;
+                    s_set_all_open = true;
+                    ImGui::OpenPopup("##set_all_timing");
+                }
+            }
+            // Set-All popup
+            if (s_set_all_open) {
+                ImGui::SetNextWindowSize(ImVec2(240.f, 0.f), ImGuiCond_Always);
+                if (ImGui::BeginPopup("##set_all_timing")) {
+                    static const char* col_names[] = { "?", "?", "Fade In", "Hold", "Fade Out", "Wait" };
+                    ImGui::Text("Set ALL cues — %s", col_names[s_set_all_col]);
+                    ImGui::Spacing();
+                    ImGui::SetNextItemWidth(160.f);
+                    DragTimingFloat("##sa_val", &s_set_all_val, 0.01f, 0.f, 600.f, state.bpm);
+                    ImGui::Spacing();
+                    if (ImGui::Button("Apply##sa_apply", ImVec2(100.f, 0.f))) {
+                        // Apply value to all cues and send updates
+                        for (int ci2 = 0; ci2 < (int)cuelist.size(); ++ci2) {
+                            FullCueEntry fce2 = cuelist[static_cast<size_t>(ci2)];
+                            if (s_set_all_col == 2) fce2.timing.fade_in  = s_set_all_val;
+                            else if (s_set_all_col == 3) fce2.timing.hold     = s_set_all_val;
+                            else if (s_set_all_col == 4) fce2.timing.fade_out = s_set_all_val;
+                            else if (s_set_all_col == 5) fce2.timing.delay_in = s_set_all_val;
+                            if (cbs.on_playback_cue_update)
+                                cbs.on_playback_cue_update(pb_id, ci2, fce2);
+                        }
+                        s_set_all_open = false;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine(0, 6.f);
+                    if (ImGui::Button("Cancel##sa_cancel", ImVec2(100.f, 0.f))) {
+                        s_set_all_open = false;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                } else {
+                    s_set_all_open = false;
+                }
+            }
 
             for (int ci = 0; ci < static_cast<int>(cuelist.size()); ++ci) {
                 ImGui::PushID(ci);
@@ -7861,6 +7929,7 @@ static void draw_show_view_grid(UIState& state, LayoutContext& ctx, LayoutCallba
                         fce.per_stream_kf[sid] = kf;
                     }
                 }
+                fce.mirrored_ids = state.active_mirrored_stream_ids;
                 cbs.on_record_frame_to_playback(pb.id, fce);
                 ctx.rec_armed = false;
             } else if (!unused && cbs.on_playback_go) {
@@ -8158,6 +8227,7 @@ void panel_playback_bar(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
                         fce.per_stream_kf[sid] = kf;
                     }
                 }
+                fce.mirrored_ids = state.active_mirrored_stream_ids;
                 cbs.on_record_frame_to_playback(pb.id, fce);
                 ctx.rec_armed = false;
             } else if (!unused && cbs.on_playback_go) {

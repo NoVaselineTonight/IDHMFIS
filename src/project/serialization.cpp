@@ -591,6 +591,10 @@ void to_json(nlohmann::json& j, const FullCueEntry& v) {
     j["per_stream_kf"] = nlohmann::json::object();
     for (const auto& [sid, kf] : v.per_stream_kf)
         j["per_stream_kf"][std::to_string(sid)] = kf;
+
+    // Mirrored stream IDs — streams that receive X-flipped output during playback
+    if (!v.mirrored_ids.empty())
+        j["mirrored_ids"] = v.mirrored_ids;
 }
 
 void from_json(const nlohmann::json& j, FullCueEntry& v) {
@@ -650,6 +654,11 @@ void from_json(const nlohmann::json& j, FullCueEntry& v) {
             } catch (...) {}
         }
     }
+
+    // Mirrored stream IDs — optional, absent in old files
+    v.mirrored_ids.clear();
+    if (j.contains("mirrored_ids"))
+        j.at("mirrored_ids").get_to(v.mirrored_ids);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
