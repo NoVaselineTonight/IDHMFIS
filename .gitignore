@@ -1,3 +1,6 @@
+# Show files (user data, not source)
+Showfiles/
+
 # Build output
 build/
 out/
