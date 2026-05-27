@@ -47,8 +47,9 @@ void BlockPulseColor::process(PointBuffer& buf, float dt, const ExprContext& ctx
     if (sync_beat) {
         phase = static_cast<float>(ctx.beat);
     } else {
-        anim_t_ += dt * speed;
-        phase = std::fmod(anim_t_, 1.f);
+        anim_t_ = std::fmod(anim_t_ + dt * speed, 1.f);
+        if (anim_t_ < 0.f) anim_t_ = 0.f;
+        phase = anim_t_;
     }
 
     float t;

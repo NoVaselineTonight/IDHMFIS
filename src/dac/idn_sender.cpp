@@ -113,8 +113,18 @@ bool IdnSender::set_point_rate(int pps) {
 // ─────────────────────────────────────────────────────────────────────────────
 IdnPoint IdnSender::convert_point(const LaserPoint& p) {
     IdnPoint ip{};
-    ip.x = static_cast<int16_t>(htons(static_cast<uint16_t>(p.x)));
-    ip.y = static_cast<int16_t>(htons(static_cast<uint16_t>(p.y)));
+    // BUG #38: Casting from uint16_t back to int16_t is implementation-defined
+    // in C++17.  Use memcpy to type-pun safely (same pattern as idn_stream.cpp).
+    {
+        uint16_t ux    = static_cast<uint16_t>(p.x);
+        uint16_t ux_be = htons(ux);
+        std::memcpy(&ip.x, &ux_be, sizeof(int16_t));
+    }
+    {
+        uint16_t uy    = static_cast<uint16_t>(p.y);
+        uint16_t uy_be = htons(uy);
+        std::memcpy(&ip.y, &uy_be, sizeof(int16_t));
+    }
     if (p.blanked) {
         ip.r = ip.g = ip.b = ip.i = 0;
     } else {

@@ -140,8 +140,7 @@ bool ArtNetSender::is_open() const {
 //  send_dmx — build and transmit one ArtDmx packet
 // ─────────────────────────────────────────────────────────────────────────────
 bool ArtNetSender::send_dmx(int universe, const uint8_t* channels, int count) {
-    if (!is_open()) return false;
-    if (!channels)  return false;
+    if (!channels) return false;
 
     // Clamp count to [2, 512] and round up to even per Art-Net 4 spec
     if (count < 2)   count = 2;
@@ -181,7 +180,11 @@ bool ArtNetSender::send_dmx(int universe, const uint8_t* channels, int count) {
     // Packet size: 18-byte header + count data bytes
     const int pkt_size = 18 + count;
 
+    // is_open() check must be done under the same mutex as close() to avoid a
+    // TOCTOU race where the socket is closed between the check and sendto().
     std::lock_guard<std::mutex> lk(send_mtx_);
+    if (!is_open()) return false;
+
     int sent = static_cast<int>(::sendto(
         sock_,
         reinterpret_cast<const char*>(&pkt),

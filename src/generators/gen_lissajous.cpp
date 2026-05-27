@@ -11,6 +11,7 @@
 
 #include "igenerator.h"
 #include <cmath>
+#include <algorithm>
 
 namespace idhmfis {
 
@@ -35,7 +36,7 @@ public:
 
         Color4 ca = p.color_a;
         Color4 cb = p.color_b;
-        int    n  = p.point_count;
+        int    n  = std::max(2, p.point_count);
 
         // Full trace over 0..2π — complete the Lissajous period properly.
         // The total period of a Lissajous is LCM(a,b) * 2π / gcd,
@@ -48,7 +49,7 @@ public:
             float x   = scale * std::sin(a * tau + delta);
             float y   = scale * std::sin(b * tau);
 
-            float frac = static_cast<float>(i) / (n - 1);
+            float frac = (n > 1) ? static_cast<float>(i) / (n - 1) : 0.f;
             Color4 col = ca.lerp(cb, frac);
 
             pts.push_back(LaserPoint::from_norm(x, y, col.r8(), col.g8(), col.b8()));

@@ -4,6 +4,7 @@
 
 #include "bam.h"
 #include "scan_fail.h"
+#include <atomic>
 #include <string>
 
 namespace idhmfis {
@@ -18,7 +19,8 @@ public:
 
     // Hardware interlock (key switch / e-stop).
     // true = interlock open = e-stop triggered = output must be blanked.
-    bool interlock_open = false;
+    // BUG #7 fix: atomic so UI-thread writes and engine-thread reads are race-free.
+    std::atomic<bool> interlock_open{false};
 
     // Apply all safety systems to a PointBuffer.
     // If interlock_open or scan_fail is triggered, ALL points are blanked.

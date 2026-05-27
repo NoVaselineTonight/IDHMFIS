@@ -119,6 +119,18 @@ void panel_timelines(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs)
     // Deferred rename-popup open: set inside the context menu, acted on after EndPopup.
     bool open_rename_popup = false;
 
+    // BUG #73: reset rename state when the timeline list changes (e.g. project
+    // reload), to prevent a stale rename_idx pointing at a deleted timeline.
+    {
+        static int s_last_timeline_count = 0;
+        int current_count = static_cast<int>(state.timelines.size());
+        if (current_count != s_last_timeline_count) {
+            rename_idx = -1;
+            rename_buf[0] = '\0';
+            s_last_timeline_count = current_count;
+        }
+    }
+
     // Row shading colours — alternating dark bands
     static constexpr ImU32 kRowEven = IM_COL32(20, 22, 28, 255);
     static constexpr ImU32 kRowOdd  = IM_COL32(17, 19, 25, 255);

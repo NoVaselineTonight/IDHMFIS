@@ -2,6 +2,7 @@
 #include "igenerator.h"
 #include <cmath>
 #include <memory>
+#include <algorithm>
 
 namespace idhmfis {
 namespace {
@@ -44,9 +45,9 @@ public:
             float frac = (float)i / spokes;
             Color4 col = p.color_a.lerp(p.color_b, frac);
             float bright = 0.5f + 0.5f * (1.f - rim_z);  // front brighter
-            uint8_t r = (uint8_t)(col.r * p.intensity * bright * 255.f);
-            uint8_t g = (uint8_t)(col.g * p.intensity * bright * 255.f);
-            uint8_t b = (uint8_t)(col.b * p.intensity * bright * 255.f);
+            uint8_t r = static_cast<uint8_t>(std::clamp(col.r * p.intensity * bright * 255.f, 0.f, 255.f));
+            uint8_t g = static_cast<uint8_t>(std::clamp(col.g * p.intensity * bright * 255.f, 0.f, 255.f));
+            uint8_t b = static_cast<uint8_t>(std::clamp(col.b * p.intensity * bright * 255.f, 0.f, 255.f));
 
             // Spoke from apex (center) to rim
             pts.push_back(LaserPoint::from_norm(0.f, 0.f, 0, 0, 0, true));
@@ -69,9 +70,9 @@ public:
 
             float frac = (float)i / ring_pts;
             Color4 col = p.color_a.lerp(p.color_b, frac);
-            uint8_t r = (uint8_t)(col.r * p.intensity * 255.f);
-            uint8_t g = (uint8_t)(col.g * p.intensity * 255.f);
-            uint8_t b = (uint8_t)(col.b * p.intensity * 255.f);
+            uint8_t r = static_cast<uint8_t>(std::clamp(col.r * p.intensity * 255.f, 0.f, 255.f));
+            uint8_t g = static_cast<uint8_t>(std::clamp(col.g * p.intensity * 255.f, 0.f, 255.f));
+            uint8_t b = static_cast<uint8_t>(std::clamp(col.b * p.intensity * 255.f, 0.f, 255.f));
             pts.push_back(LaserPoint::from_norm(rx, ry, r, g, b, i == 0));
         }
 

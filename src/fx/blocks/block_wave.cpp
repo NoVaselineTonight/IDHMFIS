@@ -69,8 +69,8 @@ void BlockWave::process(PointBuffer& buf, float dt, const ExprContext& /*ctx*/) 
         float nx = static_cast<float>(pt.x) * kInv;
         float ny = static_cast<float>(pt.y) * kInv;
 
-        // Phase along the x-axis for the wave (position-based)
-        float arg = static_cast<float>(M_PI * 2.0) * freq * nx + phase;
+        // Phase along the x-axis for the wave (position + time based)
+        float arg = static_cast<float>(M_PI * 2.0) * freq * nx + phase + anim_phase_;
         float displacement = amp * wave_sample(wf, arg);
 
         if (ax == 0 || ax == 2) {

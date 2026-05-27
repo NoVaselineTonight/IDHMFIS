@@ -118,6 +118,12 @@ bool CommonLaserStream::open() {
 //  close
 // ─────────────────────────────────────────────────────────────────────────────
 void CommonLaserStream::close() {
+    // H-22: serialize concurrent close() calls — only one thread should
+    // perform the teardown; others return immediately.
+    bool expected = false;
+    if (!closing_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        return;
+
     running_.store(false, std::memory_order_release);
 
     // Unblock accept() by closing the listen socket before joining.
@@ -133,7 +139,10 @@ void CommonLaserStream::close() {
     if (hello_thread_.joinable())  hello_thread_.join();
 
     std::lock_guard<std::mutex> lk(open_mutex_);
-    if (!open_) return;
+    if (!open_) {
+        closing_.store(false, std::memory_order_release);
+        return;
+    }
 
     {
         std::lock_guard<std::mutex> clk(clients_mutex_);
@@ -149,6 +158,7 @@ void CommonLaserStream::close() {
 
     open_ = false;
     log::info("CommonLaserStream: closed");
+    closing_.store(false, std::memory_order_release);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -259,27 +269,45 @@ std::vector<uint8_t> CommonLaserStream::build_hello_packet() {
 void CommonLaserStream::send_to_tcp_clients(const std::vector<uint8_t>& data) {
     if (data.empty()) return;
 
-    std::lock_guard<std::mutex> lk(clients_mutex_);
-    clients_.erase(
-        std::remove_if(clients_.begin(), clients_.end(),
-            [&](Client& c) -> bool {
-                if (c.sock == kClsInvalidSock) return true;
-                int total = static_cast<int>(data.size());
-                int sent  = 0;
-                while (sent < total) {
-                    int r = cls_send(c.sock,
-                                     reinterpret_cast<const char*>(data.data()) + sent,
-                                     total - sent);
-                    if (r <= 0) {
-                        cls_close_sock(c.sock);
-                        c.sock = kClsInvalidSock;
-                        return true; // remove
-                    }
-                    sent += r;
-                }
-                return false;
-            }),
-        clients_.end());
+    // BUG #66: Holding clients_mutex_ across blocking cls_send() calls stalls
+    // the DAC output thread for up to 5 ms × N_clients, causing timing jitter.
+    // Snapshot the live socket list under the lock, release the lock, then send
+    // without holding it.  Disconnected sockets are marked kClsInvalidSock and
+    // pruned from clients_ on the next pass under the lock.
+    std::vector<ClsSockFd> socks;
+    {
+        std::lock_guard<std::mutex> lk(clients_mutex_);
+        // Prune already-dead entries while we hold the lock.
+        clients_.erase(
+            std::remove_if(clients_.begin(), clients_.end(),
+                [](const Client& c) { return c.sock == kClsInvalidSock; }),
+            clients_.end());
+        socks.reserve(clients_.size());
+        for (const auto& c : clients_)
+            socks.push_back(c.sock);
+    }
+
+    // Send to each snapshotted socket without holding clients_mutex_.
+    for (ClsSockFd s : socks) {
+        if (s == kClsInvalidSock) continue;
+        int total = static_cast<int>(data.size());
+        int sent  = 0;
+        bool failed = false;
+        while (sent < total) {
+            int r = cls_send(s,
+                             reinterpret_cast<const char*>(data.data()) + sent,
+                             total - sent);
+            if (r <= 0) { failed = true; break; }
+            sent += r;
+        }
+        if (failed) {
+            // Mark the slot dead so the next lock pass prunes it.
+            cls_close_sock(s);
+            std::lock_guard<std::mutex> lk(clients_mutex_);
+            for (auto& c : clients_)
+                if (c.sock == s) { c.sock = kClsInvalidSock; break; }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

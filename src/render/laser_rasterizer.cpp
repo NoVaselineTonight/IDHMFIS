@@ -133,8 +133,10 @@ void rasterize_frame(const PointBuffer& pts,
     // Clear to black, fully opaque
     std::memset(pixels, 0, static_cast<size_t>(W) * static_cast<size_t>(H) * 4u);
 
-    // Set alpha channel to 255 for every pixel
-    for (int i = 0; i < W * H; ++i)
+    // Set alpha channel to 255 for every pixel.
+    // BUG #65: Use ptrdiff_t so the loop variable and index arithmetic do not
+    // overflow when W * H exceeds INT_MAX (resolutions above ~16K × 16K).
+    for (ptrdiff_t i = 0; i < static_cast<ptrdiff_t>(W) * H; ++i)
         pixels[i * 4 + 3] = 255u;
 
     if (pts.size() < 2)
@@ -188,7 +190,8 @@ void rasterize_frame(const PointBuffer& pts,
                 float cg = static_cast<float>(p0.g) + t * static_cast<float>(p1.g - p0.g);
                 float cb = static_cast<float>(p0.b) + t * static_cast<float>(p1.b - p0.b);
 
-                int   idx    = (py * W + px) * 4;
+                // BUG #65: Use ptrdiff_t to prevent int overflow at high resolutions.
+                ptrdiff_t idx = (static_cast<ptrdiff_t>(py) * W + px) * 4;
                 uint8_t* pix = pixels + idx;
 
                 // Glow contribution: (1 - dist/glow_r)^2 * glow_alpha

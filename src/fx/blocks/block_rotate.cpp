@@ -27,8 +27,12 @@ const std::vector<FxParam*> BlockRotate::params() const {
 }
 
 void BlockRotate::process(PointBuffer& buf, float dt, const ExprContext& /*ctx*/) {
-    // Advance auto-spin
+    // Advance auto-spin.
+    // M-21: wrap anim_angle_ into (-2π, 2π) every tick to prevent float precision
+    // loss that accumulates after ~50 hours of continuous rotation. sin/cos results
+    // are unaffected because sin/cos are periodic with period 2π.
     anim_angle_ += p_speed_.effective() * dt;
+    anim_angle_ = std::fmod(anim_angle_, static_cast<float>(2.0 * M_PI));
 
     const float total_angle = p_angle_.effective() + anim_angle_;
     const float cx = p_center_x_.effective();

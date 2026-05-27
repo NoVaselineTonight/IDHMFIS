@@ -68,9 +68,22 @@ struct ShmReader {
 
     void read_frame(uint8_t* dst) const {
         if (!view) { std::memset(dst, 0, static_cast<size_t>(kCamFrameBytes)); return; }
-        if (mutex_handle) WaitForSingleObject(mutex_handle, 100);
-        std::memcpy(dst, view->data, static_cast<size_t>(kCamFrameBytes));
-        if (mutex_handle) ReleaseMutex(mutex_handle);
+        if (mutex_handle) {
+            // BUG #27 fix: WaitForSingleObject return value was ignored — consumer
+            // could read a torn frame if the wait timed out or the mutex was abandoned.
+            // Only proceed with the memcpy if the mutex was successfully acquired.
+            DWORD wait_result = WaitForSingleObject(mutex_handle, 100);
+            if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED) {
+                // Timeout or error — return a zeroed frame rather than a torn read.
+                std::memset(dst, 0, static_cast<size_t>(kCamFrameBytes));
+                return;
+            }
+            std::memcpy(dst, view->data, static_cast<size_t>(kCamFrameBytes));
+            ReleaseMutex(mutex_handle);
+        } else {
+            // No mutex — copy without synchronisation (best effort, no mutex available).
+            std::memcpy(dst, view->data, static_cast<size_t>(kCamFrameBytes));
+        }
     }
 };
 

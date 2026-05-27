@@ -3,6 +3,7 @@
 // Files are loaded once and cached by integer ID.
 
 #include "ilda.h"
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -21,12 +22,21 @@ public:
     const IldaFile* get(int id) const;
 
     // Number of loaded files.
-    int count() const { return static_cast<int>(pool_.size()); }
+    int count() const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return static_cast<int>(pool_.size());
+    }
 
-    // All current (id, source_path) pairs.
-    const std::vector<std::pair<int, std::string>>& entries() const { return entries_; }
+    // Returns a snapshot copy of (id, source_path) pairs.
+    // H-12: returns by value so the caller holds a safe snapshot rather than a
+    // reference into the pool that the engine thread may mutate concurrently.
+    std::vector<std::pair<int, std::string>> entries() const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return entries_;
+    }
 
 private:
+    mutable std::mutex mtx_;  // H-12: load/unload/get from different threads
     std::vector<std::pair<int, IldaFile>> pool_;
     std::vector<std::pair<int, std::string>> entries_;
     int next_id_ = 0;

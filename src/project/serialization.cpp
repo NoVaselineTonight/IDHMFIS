@@ -10,6 +10,8 @@
 //   - The schema_version field drives migration in Project::from_json.
 
 #include "serialization.h"
+#include <algorithm>
+#include <climits>
 #include <stdexcept>
 
 namespace idhmfis {
@@ -339,12 +341,17 @@ void to_json(nlohmann::json& j, const CueTimingBlock& v) {
 }
 
 void from_json(const nlohmann::json& j, CueTimingBlock& v) {
-    v.fade_in   = j.value("fade_in",   0.f);
-    v.fade_out  = j.value("fade_out",  0.f);
-    v.delay_in  = j.value("delay_in",  0.f);
-    v.delay_out = j.value("delay_out", 0.f);
-    v.hold      = j.value("hold",      0.f);
-    v.wait      = j.value("wait",      0.f);
+    // L-8: clamp all timing floats to sane ranges on load so a corrupt or
+    // hand-edited project file can't push negative/extreme values into the
+    // playback state machine (negative fade_in causes the engine to never
+    // leave delay phase; extreme hold causes a multi-hour freeze).
+    static constexpr float kMaxTimeSec = 3600.f; // 1 hour ceiling per phase
+    v.fade_in   = std::max(0.f, std::min(j.value("fade_in",   0.f), kMaxTimeSec));
+    v.fade_out  = std::max(0.f, std::min(j.value("fade_out",  0.f), kMaxTimeSec));
+    v.delay_in  = std::max(0.f, std::min(j.value("delay_in",  0.f), kMaxTimeSec));
+    v.delay_out = std::max(0.f, std::min(j.value("delay_out", 0.f), kMaxTimeSec));
+    v.hold      = std::max(0.f, std::min(j.value("hold",      0.f), kMaxTimeSec));
+    v.wait      = std::max(0.f, std::min(j.value("wait",      0.f), kMaxTimeSec));
     v.path      = j.value("path",      PathInterp::Linear);
     v.fan       = j.value("fan",       FanMode::None);
     v.fan_seed  = j.value("fan_seed",  0.f);
@@ -639,8 +646,16 @@ void from_json(const nlohmann::json& j, FullCueEntry& v) {
     v.per_stream_fx.clear();
     if (j.contains("per_stream_fx")) {
         for (const auto& [sk, sv] : j.at("per_stream_fx").items()) {
-            int sid = std::stoi(sk);
-            from_json(sv, v.per_stream_fx[sid]);
+            // L-18: wrap each entry so a single malformed stream entry does not
+            // abort the entire cue deserialization (std::stoi throws on non-int
+            // keys; from_json may throw on schema mismatch in corrupt files).
+            try {
+                int sid = std::stoi(sk);
+                from_json(sv, v.per_stream_fx[sid]);
+            } catch (...) {
+                // Skip this entry; the stream will fall back to the cue's
+                // default FX chain which is correct behaviour for unknown data.
+            }
         }
     }
 
@@ -1262,7 +1277,8 @@ void to_json(nlohmann::json& j, const Project& v) {
             {"ndi_net_auto",            nc.ndi_net_auto},
             {"ndi_net_source_name",     nc.ndi_net_source_name},
             {"ndi_net_bandwidth",       nc.ndi_net_bandwidth},
-            {"ndi_net_fps",             nc.ndi_net_fps}
+            {"ndi_net_fps",             nc.ndi_net_fps},
+            {"dmx_universe_offset",      nc.dmx_universe_offset}
         };
     }
 
@@ -1302,7 +1318,11 @@ void to_json(nlohmann::json& j, const Project& v) {
             {"beam_brightness", p3.beam_brightness},
             {"haze_alpha",      p3.haze_alpha},
             {"wall_glow_px",    p3.wall_glow_px},
-            {"beam_width_px",   p3.beam_width_px}
+            {"beam_width_px",   p3.beam_width_px},
+            {"room_half_width", p3.room_half_width},
+            {"room_height",     p3.room_height},
+            {"room_depth",      p3.room_depth},
+            {"proj_scale",      p3.proj_scale}
         };
     }
 
@@ -1339,6 +1359,9 @@ void to_json(nlohmann::json& j, const Project& v) {
     // active stream ids
     j["active_stream_ids"] = v.active_stream_ids;
 
+    // broadcast mode
+    j["broadcast_to_all"] = v.broadcast_to_all;
+
     // timeline system
     j["timelines"] = v.timelines;
     j["tc_config"] = v.tc_config;
@@ -1359,13 +1382,27 @@ void from_json(const nlohmann::json& j, Project& v) {
     v.modified_at     = j.value("modified_at",     std::string{});
 
     v.cues.clear();
-    if (j.contains("cues"))           j.at("cues").get_to(v.cues);
+    if (j.contains("cues") && j.at("cues").is_array()) {
+        for (const auto& item : j.at("cues")) {
+            try { Cue c; item.get_to(c); v.cues.push_back(std::move(c)); }
+            catch (...) {}
+        }
+    }
+    // BUG #64: guard all array fields with is_array() before iterating to
+    // prevent nlohmann::json type_error crashes on malformed project files.
     v.cue_list.clear();
-    if (j.contains("cue_list"))       j.at("cue_list").get_to(v.cue_list);
+    if (j.contains("cue_list") && j.at("cue_list").is_array())
+        j.at("cue_list").get_to(v.cue_list);
     v.dmx_patches.clear();
-    if (j.contains("dmx_patches"))    j.at("dmx_patches").get_to(v.dmx_patches);
+    if (j.contains("dmx_patches") && j.at("dmx_patches").is_array())
+        j.at("dmx_patches").get_to(v.dmx_patches);
     v.full_cue_list.clear();
-    if (j.contains("full_cue_list"))  j.at("full_cue_list").get_to(v.full_cue_list);
+    if (j.contains("full_cue_list") && j.at("full_cue_list").is_array()) {
+        for (const auto& item : j.at("full_cue_list")) {
+            try { FullCueEntry fce; item.get_to(fce); v.full_cue_list.push_back(std::move(fce)); }
+            catch (...) {}
+        }
+    }
 
     v.point_rate      = j.value("point_rate",      kDefaultPointRate);
     v.ndi_width       = j.value("ndi_width",       kDefaultNDIWidth);
@@ -1387,7 +1424,12 @@ void from_json(const nlohmann::json& j, Project& v) {
     v.film_grain      = j.value("film_grain",      false);
 
     v.playbacks.clear();
-    if (j.contains("playbacks")) j.at("playbacks").get_to(v.playbacks);
+    if (j.contains("playbacks") && j.at("playbacks").is_array()) {
+        for (const auto& item : j.at("playbacks")) {
+            try { PlaybackDef pb; item.get_to(pb); v.playbacks.push_back(std::move(pb)); }
+            catch (...) {}
+        }
+    }
 
     v.bpm_tap_key           = j.value("bpm_tap_key",           0);
     v.emergency_shutoff_key = j.value("emergency_shutoff_key", 0);
@@ -1480,6 +1522,11 @@ void from_json(const nlohmann::json& j, Project& v) {
         nc.ndi_net_source_name = jn.value("ndi_net_source_name", std::string{"IDHMFIS Laser Preview"});
         nc.ndi_net_bandwidth   = jn.value("ndi_net_bandwidth",   1);
         nc.ndi_net_fps         = jn.value("ndi_net_fps",         30);
+        // New key "dmx_universe_offset"; fall back to old "dmx_channel_offset" for
+        // files saved before v4.09 so existing settings are not silently lost.
+        nc.dmx_universe_offset = jn.contains("dmx_universe_offset")
+                                     ? jn.value("dmx_universe_offset", 0)
+                                     : jn.value("dmx_channel_offset",  0);
     }
 
     // output config (optional — old files get defaults)
@@ -1518,6 +1565,10 @@ void from_json(const nlohmann::json& j, Project& v) {
         p3.haze_alpha      = jp.value("haze_alpha",      0.35f);
         p3.wall_glow_px    = jp.value("wall_glow_px",    5.f);
         p3.beam_width_px   = jp.value("beam_width_px",   1.5f);
+        p3.room_half_width = jp.value("room_half_width", 6.f);
+        p3.room_height     = jp.value("room_height",     5.f);
+        p3.room_depth      = jp.value("room_depth",      20.f);
+        p3.proj_scale      = jp.value("proj_scale",      3.0f);
     }
 
     // laser placements (optional)
@@ -1554,10 +1605,17 @@ void from_json(const nlohmann::json& j, Project& v) {
     if (j.contains("active_stream_ids") && j.at("active_stream_ids").is_array())
         j.at("active_stream_ids").get_to(v.active_stream_ids);
 
+    // broadcast mode (optional — default true for backward compat)
+    v.broadcast_to_all = j.value("broadcast_to_all", true);
+
     // timeline system (optional — old files get empty defaults)
     v.timelines.clear();
-    if (j.contains("timelines") && j.at("timelines").is_array())
-        j.at("timelines").get_to(v.timelines);
+    if (j.contains("timelines") && j.at("timelines").is_array()) {
+        for (const auto& item : j.at("timelines")) {
+            try { TimelineDef td; item.get_to(td); v.timelines.push_back(std::move(td)); }
+            catch (...) {}
+        }
+    }
     if (j.contains("tc_config"))
         j.at("tc_config").get_to(v.tc_config);
 
@@ -1668,8 +1726,13 @@ void from_json(const nlohmann::json& j, TimelineDef& v) {
     v.id                 = j.value("id",                 std::string{});
     v.name               = j.value("name",               std::string{"Timeline"});
     v.fps                = j.value("fps",                SmpteRate::Fps25);
-    v.length_frames      = j.value("length_frames",      int64_t{0});
-    v.time_offset_frames = j.value("time_offset_frames", int64_t{0});
+    // BUG #72: clamp length_frames and time_offset_frames to prevent extreme
+    // values from corrupt/malformed project files causing arithmetic overflow
+    // or UI hangs in the timeline rendering code.
+    v.length_frames      = std::min(j.value("length_frames",      int64_t{0}),
+                                    int64_t{INT64_MAX / 2});
+    v.time_offset_frames = std::min(j.value("time_offset_frames", int64_t{0}),
+                                    int64_t{INT64_MAX / 2});
     v.tc_slot            = j.value("tc_slot",            std::string{"Default"});
     v.link_mode          = j.value("link_mode",          true);
     v.record_armed       = j.value("record_armed",       false);

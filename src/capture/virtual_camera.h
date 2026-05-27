@@ -28,7 +28,6 @@
 
 #include "camera_shm.h"
 #include "core/types.h"
-#include "ndi_sender.h"
 
 #include <atomic>
 #include <chrono>
@@ -101,11 +100,7 @@ private:
     void start_mf_virtual_camera();
     void stop_mf_virtual_camera();
 
-    // NDI output — primary "virtual camera" path (no admin needed)
-    NdiSender            ndi_sender_;
-    std::vector<uint8_t> bgra_;  // BGRA conversion buffer, pre-allocated
-
-    // Rate-limiter: cap rasterize+NDI to 30fps so the DAC output thread
+    // Rate-limiter: cap rasterize to 30fps so the DAC output thread
     // isn't stalled by heavy image work on every engine tick.
     using Clock = std::chrono::steady_clock;
     Clock::time_point    last_push_{ Clock::time_point::min() };

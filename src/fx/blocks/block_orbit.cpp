@@ -29,6 +29,8 @@ const std::vector<FxParam*> BlockOrbit::params() const {
 void BlockOrbit::process(PointBuffer& buf, float dt, const ExprContext& /*ctx*/) {
     const float speed = p_speed_.effective();
     anim_phase_ += speed * static_cast<float>(2.0 * M_PI) * dt;
+    // Wrap to [-2pi, 2pi] to preserve float precision over long shows
+    anim_phase_ = std::fmod(anim_phase_, static_cast<float>(2.0 * M_PI));
 
     const float radius = p_radius_.effective();
     const float phase0 = p_phase_.effective() * static_cast<float>(M_PI) / 180.f;

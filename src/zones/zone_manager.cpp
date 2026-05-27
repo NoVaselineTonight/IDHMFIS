@@ -68,6 +68,11 @@ const std::vector<Zone>& ZoneManager::zones() const { return zones_; }
 PointBuffer ZoneManager::apply_transform(const PointBuffer& src,
                                           const ZoneTransform& t) const
 {
+    // BUG #56 fix: NaN or non-positive scale propagates to the int16_t cast → UB.
+    // Sanitize scale before use; non-finite or zero scale is treated as identity (1.0).
+    const float scale_x = (std::isfinite(t.scale_x) && t.scale_x > 0.f) ? t.scale_x : 1.f;
+    const float scale_y = (std::isfinite(t.scale_y) && t.scale_y > 0.f) ? t.scale_y : 1.f;
+
     // Pre-compute rotation coefficients (degrees -> radians).
     const float rad  = t.rotation * (3.14159265358979323846f / 180.f);
     const float cr   = std::cos(rad);
@@ -81,9 +86,9 @@ PointBuffer ZoneManager::apply_transform(const PointBuffer& src,
         float x = in.nx();
         float y = in.ny();
 
-        // 1. Scale
-        x *= t.scale_x;
-        y *= t.scale_y;
+        // 1. Scale (using sanitized values — see BUG #56 fix above)
+        x *= scale_x;
+        y *= scale_y;
 
         // 2. Shear  (x' = x + shear_x*y,  y' = y + shear_y*x)
         float xs = x + t.shear_x * y;
@@ -128,8 +133,13 @@ PointBuffer ZoneManager::apply_transform(const PointBuffer& src,
         }
 
         LaserPoint out = in;
-        out.x = static_cast<int16_t>(std::clamp(x, -1.f, 1.f) * 32767.f);
-        out.y = static_cast<int16_t>(std::clamp(y, -1.f, 1.f) * 32767.f);
+        // BUG #56 fix: clamp to [-32768, 32767] float range before cast to guard
+        // against NaN/Inf from any upstream arithmetic (shear, rotation, keystone).
+        // std::clamp on NaN is unspecified, so replace NaN with 0 first.
+        float cx = std::isfinite(x) ? x : 0.f;
+        float cy = std::isfinite(y) ? y : 0.f;
+        out.x = static_cast<int16_t>(std::clamp(cx * 32767.f, -32768.f, 32767.f));
+        out.y = static_cast<int16_t>(std::clamp(cy * 32767.f, -32768.f, 32767.f));
         dst.push_back(out);
     }
     return dst;
@@ -162,6 +172,10 @@ void ZoneManager::apply_color(PointBuffer& buf,
 // ─────────────────────────────────────────────────────────────────────────────
 PointBuffer ZoneManager::test_pattern(int pattern_type, int point_count) const
 {
+    // BUG #25 fix: many pattern branches divide by point_count or derived quantities.
+    // Enforce a minimum so none of those denominators can be zero or negative.
+    if (point_count < 2) return {};
+
     PointBuffer buf;
 
     static constexpr float kPi    = 3.14159265358979323846f;
@@ -193,6 +207,8 @@ PointBuffer ZoneManager::test_pattern(int pattern_type, int point_count) const
     // Horizontal line then vertical line, each 256 pts; blank gap at origin.
     case 1:
     {
+        // BUG #25 fix: half - 1 is used as a divisor; need half >= 2 (point_count >= 4).
+        if (point_count < 4) return {};
         const int half = point_count / 2;
         const float gap = 0.05f;
         buf.reserve(static_cast<size_t>(point_count) + 4);
@@ -225,6 +241,8 @@ PointBuffer ZoneManager::test_pattern(int pattern_type, int point_count) const
     // Square outline from (-0.8,-0.8) to (0.8,0.8).
     case 2:
     {
+        // BUG #25 fix: side - 1 is used as a divisor; need side >= 2 (point_count >= 8).
+        if (point_count < 8) return {};
         const float ext = 0.8f;
         const int side  = point_count / 4;
         buf.reserve(static_cast<size_t>(point_count) + 4);
@@ -262,6 +280,10 @@ PointBuffer ZoneManager::test_pattern(int pattern_type, int point_count) const
     // {0,2,4,1,3,0} inner/outer point sequence.
     case 3:
     {
+        // BUG #25 fix: seg_pts = point_count/5 is used as a divisor; need seg_pts >= 1
+        // (point_count >= 5). Also need point_count >= 10 for the inner/outer vertices
+        // to be evenly distributed (each segment has at least 2 points).
+        if (point_count < 10) return {};
         // Build outer and inner vertices of a regular 5-point star.
         const float outer_r = 0.85f;
         const float inner_r = 0.35f;

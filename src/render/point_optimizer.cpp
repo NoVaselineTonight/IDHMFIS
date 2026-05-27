@@ -367,7 +367,15 @@ PointBuffer PointOptimizer::step_density_norm(const PointBuffer& in) const
             total_len += pt_dist(in[i-1], in[i]);
     }
 
-    if (total_len < 1e-6f) return in;
+    if (total_len < 1e-6f) {
+        // H-15: degenerate frame — all lit segments have zero length (identical
+        // positions, all-blank, or a single-point frame). Returning `in` unchanged
+        // could pass thousands of duplicate points to the DAC, wasting bandwidth
+        // and creating a visible bright spot. Clamp to the caller-supplied budget
+        // so the DAC never receives more points than it requested.
+        if (static_cast<int>(in.size()) <= budget) return in;
+        return PointBuffer(in.begin(), in.begin() + static_cast<ptrdiff_t>(budget));
+    }
 
     // Points per unit length
     float pts_per_unit = static_cast<float>(budget) / total_len;

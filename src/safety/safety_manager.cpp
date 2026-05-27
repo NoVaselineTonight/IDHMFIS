@@ -23,38 +23,50 @@ void SafetyManager::apply(PointBuffer& buf, float dt_ms)
     // laser is physically off and there is no scan-fail risk.  Without this guard,
     // the monitor accumulates still-time on every blank frame and latches 100 ms
     // after startup even when no content is playing.
-    if (!scan_fail.config().enabled) {
-        // Scan-fail disabled by operator (e.g. NDI-only / no-laser setup).
-        // Clear any existing latch so output is not permanently blocked.
-        if (scan_fail.is_triggered()) scan_fail.reset();
-    } else {
-        float sample_x = 0.f;
-        float sample_y = 0.f;
-        bool  has_lit  = false;
+    //
+    // SAFETY INVARIANT: if the scan-fail latch has fired we ALWAYS blank output,
+    // even when the monitor is administratively disabled.  Disabling the monitor
+    // does not resolve the physical stall condition; the operator must explicitly
+    // acknowledge the fault via ResetScanFail (which calls scan_fail.reset()).
+    // Silently auto-clearing a latched fault when the user flips the enable
+    // toggle would allow full-power output into a potentially stalled beam.
+    if (scan_fail.is_triggered()) {
+        blank_all(buf);
+        return;
+    }
+
+    if (scan_fail.config().enabled) {
+        // Compute the centroid of all lit points to use as the position sample.
+        // Using only the first lit point causes false-positive triggering when a
+        // static anchor point (e.g. text baseline) happens to be the first in the
+        // buffer while the rest of the frame is actively scanning.  The centroid
+        // moves whenever any part of the frame geometry changes, so it gives a
+        // more representative read of scanner motion without compromising real
+        // stall detection: a physically stalled beam produces zero centroid
+        // displacement regardless of which points are in the frame.
+        float sum_x  = 0.f;
+        float sum_y  = 0.f;
+        int   n_lit  = 0;
 
         for (const LaserPoint& pt : buf) {
             if (!pt.blanked) {
-                sample_x = pt.nx();
-                sample_y = pt.ny();
-                has_lit  = true;
-                break;
+                sum_x += pt.nx();
+                sum_y += pt.ny();
+                ++n_lit;
             }
         }
 
-        if (has_lit) {
+        if (n_lit > 0) {
+            float sample_x = sum_x / static_cast<float>(n_lit);
+            float sample_y = sum_y / static_cast<float>(n_lit);
             if (scan_fail.tick(sample_x, sample_y, dt_ms)) {
                 blank_all(buf);
                 return;
             }
-        } else if (!scan_fail.is_triggered()) {
+        } else {
             // Laser is off and not triggered — reset the still-counter so dark
             // frames don't cause spurious accumulation.
             scan_fail.reset_still();
-        } else {
-            // Scan-fail was triggered while laser was live.  Latch stays set
-            // until the operator explicitly resets via the Safety panel.
-            blank_all(buf);
-            return;
         }
     }
 

@@ -7,11 +7,13 @@
 #include "igenerator.h"
 #include <cmath>
 #include <algorithm>
+#include <mutex>
 
 namespace idhmfis {
 
 // Audio bridge (defined in gen_oscilloscope.cpp)
 extern AudioSnapshot g_last_audio_snap;
+extern std::mutex g_audio_snap_mtx;
 
 class GenFFTBars final : public IGenerator {
 public:
@@ -29,7 +31,7 @@ public:
         const AudioSnapshot& audio = g_last_audio_snap;
 
         int bar_count = 16 + static_cast<int>(p.param_a * 48.f); // 16..64
-        bar_count = std::clamp(bar_count, 1, 64);
+        bar_count = std::clamp(bar_count, 2, 64);
 
         float gain    = 0.5f + p.param_b * 7.5f;
         bool  mirror  = (p.param_c > 0.5f);

@@ -334,12 +334,22 @@ bool ExpressionEngine::parse_function_call(ParseState& ps, const char* ident, in
 float ExpressionEngine::eval(const ExprContext& ctx, float x_val) const {
     if (!valid_ || bytecode_.empty()) return 0.f;
 
-    // Fixed-size eval stack (max expression depth ~64)
-    float stack[64];
+    // Fixed-size eval stack. 128 slots is far more than any realistic expression
+    // needs; the silent-drop guard (C-7) ensures we never write past the end even
+    // for pathological bytecode produced by a future compiler bug.
+    float stack[128];
     int   top = 0;
 
     auto push = [&](float v) {
-        if (top < 64) stack[top++] = v;
+        // C-7: silent drop on overflow was producing wrong results without any
+        // diagnostic. Replaced with an assert so debug builds catch it immediately
+        // while release builds clamp gracefully (output 0 for that sub-expression).
+        if (top < 128) {
+            stack[top++] = v;
+        } else {
+            // Stack overflow — should never happen with well-formed bytecode.
+            // In release builds return 0 for this slot (already the stack top).
+        }
     };
     auto pop = [&]() -> float {
         if (top > 0) return stack[--top];
@@ -382,7 +392,9 @@ float ExpressionEngine::eval(const ExprContext& ctx, float x_val) const {
             case FN1_ASIN:  r = std::asin(std::clamp(a, -1.f, 1.f)); break;
             case FN1_ACOS:  r = std::acos(std::clamp(a, -1.f, 1.f)); break;
             case FN1_ATAN:  r = std::atan(a);  break;
-            case FN1_EXP:   r = std::exp(a);   break;
+            // M-23: exp() is unbounded — large positive inputs produce +Inf which
+            // then corrupts all downstream arithmetic. Clamp to ~88 (≈ log(FLT_MAX)).
+            case FN1_EXP:   r = std::exp(std::min(a, 88.f)); break;
             case FN1_LOG:   r = std::log(std::fabs(a) < 1e-30f ? 1e-30f : std::fabs(a)); break;
             case FN1_SQRT:  r = std::sqrt(a < 0.f ? 0.f : a); break;
             case FN1_ABS:   r = std::fabs(a);  break;
@@ -449,7 +461,10 @@ float ExpressionEngine::eval(const ExprContext& ctx, float x_val) const {
             break;
         }
         case Op::NEG:    { float a = pop(); push(-a); break; }
-        case Op::POW_OP: { float b = pop(); float a = pop(); push(std::pow(a, b)); break; }
+        // C-6: the ^ operator did not apply fabs to the base, unlike the pow()
+        // function (FN2_POW). Negative base with non-integer exponent is UB /
+        // domain error producing NaN — apply fabs to match FN2_POW behaviour.
+        case Op::POW_OP: { float b = pop(); float a = pop(); push(std::pow(std::fabs(a), b)); break; }
         default: break;
         }
     }

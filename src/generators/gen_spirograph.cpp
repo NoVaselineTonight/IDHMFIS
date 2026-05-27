@@ -10,6 +10,7 @@
 
 #include "igenerator.h"
 #include <cmath>
+#include <algorithm>
 
 namespace idhmfis {
 
@@ -42,7 +43,7 @@ public:
         float anim_offset = static_cast<float>(t) * p.speed * trace_speed;
         float scale = p.scale / (R + r + 1.f); // normalise to unit circle
 
-        int n = p.point_count;
+        int n = std::max(2, p.point_count);
         Color4 ca = p.color_a;
         Color4 cb = p.color_b;
 
@@ -52,7 +53,7 @@ public:
             float x = ((R + r) * std::cos(tau) - d * std::cos((R + r) / r * tau)) * scale;
             float y = ((R + r) * std::sin(tau) - d * std::sin((R + r) / r * tau)) * scale;
 
-            float frac = static_cast<float>(i) / (n - 1);
+            float frac = (n > 1) ? static_cast<float>(i) / (n - 1) : 0.f;
             Color4 col = ca.lerp(cb, frac);
 
             pts.push_back(LaserPoint::from_norm(x, y, col.r8(), col.g8(), col.b8(),

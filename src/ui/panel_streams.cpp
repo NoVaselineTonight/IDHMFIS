@@ -702,7 +702,7 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
 
         if (ImGui::SmallButton("AUTO GROUPS..."))
             ImGui::OpenPopup("##auto_groups_popup");
-        ImGui::SetItemTooltip("Auto-generate symmetrical groups from the current output layout");
+        ImGui::SetItemTooltip("Auto-generate symmetrical groups from the selected heads");
 
         if (ImGui::BeginPopup("##auto_groups_popup")) {
             ImGui::TextUnformatted("Auto Generate Groups");
@@ -723,13 +723,15 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
 
             ImGui::Spacing();
 
-            // Collect enabled outputs in display order (s_cell_order)
+            // Collect SELECTED outputs in display order (s_cell_order).
+            // Only selected heads participate — patch all first if you want everything.
             auto get_ordered_outputs = [&]() -> std::vector<int> {
                 std::vector<int> ids;
+                const auto& sel = state.active_stream_ids;
                 for (int cid : s_cell_order) {
                     if (cid < 0) continue;
-                    for (const auto& po : state.patched_outputs)
-                        if (po.id == cid && po.enabled) { ids.push_back(cid); break; }
+                    if (std::find(sel.begin(), sel.end(), cid) != sel.end())
+                        ids.push_back(cid);
                 }
                 return ids;
             };
@@ -819,20 +821,19 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                         mirB = groupA;
                     }
 
-                    // Mode-specific label prefixes
-                    static const char* kPrefixA[] = { "(Odd)",   "(Outer)", "(First)", "(Pair A)" };
-                    static const char* kPrefixB[] = { "(Even)",  "(Inner)", "(Last)",  "(Pair B)" };
-                    static const char* kBase[]     = { "Auto",    "Sym",     "Half",    "ZZ"       };
+                    // Clean, mode-specific group names (no cryptic abbreviations)
+                    static const char* kNameA[]    = { "Odd",        "Outer",      "Front Half",  "Pair A"   };
+                    static const char* kNameB[]    = { "Even",       "Inner",      "Back Half",   "Pair B"   };
 
                     struct GenGroup { std::vector<int> members; std::vector<int> mirrored; std::string name; };
                     std::vector<GenGroup> gg;
                     if (!groupA.empty()) {
-                        gg.push_back({ groupA, {},    std::string(kBase[s_auto_mode]) + kPrefixA[s_auto_mode] });
-                        gg.push_back({ groupA, mirA,  std::string(kBase[s_auto_mode]) + kPrefixA[s_auto_mode] + " Mir" });
+                        gg.push_back({ groupA, {},    std::string(kNameA[s_auto_mode]) });
+                        gg.push_back({ groupA, mirA,  std::string(kNameA[s_auto_mode]) + " Mirror" });
                     }
                     if (!groupB.empty()) {
-                        gg.push_back({ groupB, {},    std::string(kBase[s_auto_mode]) + kPrefixB[s_auto_mode] });
-                        gg.push_back({ groupB, mirB,  std::string(kBase[s_auto_mode]) + kPrefixB[s_auto_mode] + " Mir" });
+                        gg.push_back({ groupB, {},    std::string(kNameB[s_auto_mode]) });
+                        gg.push_back({ groupB, mirB,  std::string(kNameB[s_auto_mode]) + " Mirror" });
                     }
 
                     std::vector<int> free_slots = find_free_slots(static_cast<int>(gg.size()));
@@ -859,8 +860,10 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                 }
             }
 
-            if (get_ordered_outputs().size() < 2)
-                ImGui::TextColored(ImVec4(1.f,0.5f,0.3f,1.f), "Need >= 2 enabled outputs.");
+            if (state.active_stream_ids.empty())
+                ImGui::TextColored(ImVec4(1.f,0.5f,0.3f,1.f), "Select heads first (click cells above).");
+            else if (get_ordered_outputs().size() < 2)
+                ImGui::TextColored(ImVec4(1.f,0.5f,0.3f,1.f), "Select >= 2 heads to generate groups.");
 
             ImGui::EndPopup();
         }

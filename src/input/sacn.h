@@ -119,8 +119,10 @@ private:
     std::atomic<bool> running_{false};
 
     // Per-universe sequence numbers (1-63999 range, sACN is 1-based)
-    // Only track up to 64 universes for sACN sender
-    static constexpr int kMaxSACNUniverses = 64;
+    // BUG #71: expanded from 64 to kMaxSACNUniverses to cover the full sACN
+    // universe range (1-63999). Using a shared counter for universes past index
+    // 64 could cause receivers to discard packets due to sequence violations.
+    static constexpr int kMaxSACNUniverses = 63999;
     uint8_t  seq_[kMaxSACNUniverses] = {};
 
     // sACN constants

@@ -275,7 +275,15 @@ LdPoint LaserDockDac::convert_point(const LaserPoint& p) {
 //    Bytes 2–N: packed LdPoint structs
 // ─────────────────────────────────────────────────────────────────────────────
 int LaserDockDac::send_report(const LdPoint* pts, int count) {
+    // BUG #33: Verify at compile time that the fixed report buffer is large
+    // enough to hold the maximum number of points.
+    static_assert(3 + kLdPointsPerReport * sizeof(LdPoint) <= kLdReportSize + 1,
+        "LaserDock report buffer too small for kLdPointsPerReport points");
+
     int actual = std::min(count, kLdPointsPerReport);
+    // BUG #33 (runtime clamp): guard against future constant changes where
+    // kLdPointsPerReport > (kLdReportSize - 2) / sizeof(LdPoint).
+    actual = std::min(actual, static_cast<int>((kLdReportSize - 2) / sizeof(LdPoint)));
 
     uint8_t report[kLdReportSize + 1]{};
     report[0] = 0x00;                          // HID report ID

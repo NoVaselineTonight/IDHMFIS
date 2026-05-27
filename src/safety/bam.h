@@ -3,7 +3,9 @@
 // 64x64 grid superior to Beyond's 32x32. Each cell is 0..255 (0=full block, 255=full pass).
 
 #include "../core/types.h"
+#include <atomic>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -64,19 +66,25 @@ public:
     // Must be called whenever grid or zones change.
     void rebuild_cache();
 
-    bool enabled = true;
+    // BUG #30 fix: atomic so UI-thread writes and engine-thread reads are race-free.
+    std::atomic<bool> enabled{true};
 
 private:
     BamGrid grid_;
     std::vector<SafetyZone> zones_;
     // Cached effective attenuation per cell (combined grid + rasterized zones).
+    // H-13: cache_ is written by rebuild_cache() on the UI thread and read by
+    // apply() on the engine thread — protect with a mutex.
+    mutable std::mutex cache_mtx_;
     float cache_[BamGrid::kSize][BamGrid::kSize]{};
 
     // Point-in-polygon test using ray casting algorithm.
     bool point_in_polygon(float x, float y,
                           const std::vector<std::pair<float, float>>& poly) const;
 
-    // Rasterize a single safety zone onto cache_ (takes minimum of existing and zone).
+    // BUG #31 fix: DEAD CODE — do NOT call directly.
+    // rasterize_zone() historically wrote to cache_ without holding cache_mtx_,
+    // creating a data race with apply(). It is now a no-op. Use rebuild_cache().
     void rasterize_zone(const SafetyZone& z);
 };
 

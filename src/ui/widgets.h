@@ -86,13 +86,18 @@ bool CueCard(const CueInfo& cue,
 //  bpm: used to draw beat ticks
 //  Returns new playhead time if user clicked to seek, else < 0.
 // ─────────────────────────────────────────────────────────────────────────────
+// scroll_x_ptr: pointer to a persistent scroll offset (pixels from left).
+//   If non-null, dragging the ruler pans the timeline; vertical mouse-wheel
+//   over the ruler also scrolls horizontally.  The caller is responsible for
+//   clamping the value to [0, max_scroll].
 double TimelineRuler(const char* id,
                      double playhead_s,
                      double total_s,
                      float  width,
                      float  height,
                      float  pixels_per_second,
-                     float  bpm);
+                     float  bpm,
+                     float* scroll_x_ptr = nullptr);
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  KeyframeTrack

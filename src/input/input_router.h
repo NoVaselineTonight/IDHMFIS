@@ -132,6 +132,12 @@ private:
 
     // Sustain pedal state for MIDI play/stop toggle
     bool sustain_held_{false};
+
+    // Self-tick background thread — drains all input queues at ~1 kHz.
+    // Calls tick() so DMX/MIDI/OSC reach the engine without requiring the
+    // caller to poll.  Stopped before the listeners in stop().
+    std::atomic<bool> tick_running_{false};
+    std::thread       tick_thread_;
 };
 
 } // namespace idhmfis

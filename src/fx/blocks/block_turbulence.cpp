@@ -68,6 +68,7 @@ float BlockTurbulence::fbm(float x, float y, int octaves) const {
 
 void BlockTurbulence::process(PointBuffer& buf, float dt, const ExprContext& /*ctx*/) {
     anim_t_ += dt;
+    if (anim_t_ > 65536.f) anim_t_ -= 65536.f;
     const float amount  = p_amount_.effective();
     const float scale   = p_scale_.effective();
     const float speed   = p_speed_.effective();

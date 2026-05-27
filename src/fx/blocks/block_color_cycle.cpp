@@ -73,7 +73,9 @@ void BlockColorCycle::process(PointBuffer& buf, float dt, const ExprContext& /*c
             extra = anim_hue_ + t;
         }
 
-        float new_h = std::fmod(orig_h / 360.f + base_hue + extra, 1.f) * 360.f;
+        float hue_norm = std::fmod(orig_h / 360.f + base_hue + extra, 1.f);
+        if (hue_norm < 0.f) hue_norm += 1.f;
+        float new_h = hue_norm * 360.f;
         float new_s = sat;
         float new_v = bri * (orig_v > 0.f ? orig_v : 1.f);
 

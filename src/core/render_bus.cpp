@@ -10,12 +10,15 @@ RenderBus::RenderBus() {
 RenderBus::~RenderBus() = default;
 
 RenderFrame* RenderBus::FramePool::acquire() {
+    // H-5: next_free is now std::atomic<int>; use relaxed load/store since it is
+    // only a search-start hint — correctness comes from the CAS on in_use[i].
+    const int hint = next_free.load(std::memory_order_relaxed);
     for (int j = 0; j < kPoolSize; ++j) {
-        int i = (next_free + j) % kPoolSize;
+        int i = (hint + j) % kPoolSize;
         bool expected = false;
         if (in_use[i].compare_exchange_strong(expected, true,
                 std::memory_order_acquire, std::memory_order_relaxed)) {
-            next_free = (i + 1) % kPoolSize;
+            next_free.store((i + 1) % kPoolSize, std::memory_order_relaxed);
             return &frames[i];
         }
     }

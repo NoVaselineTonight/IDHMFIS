@@ -32,8 +32,8 @@ public:
     void remove_binding(const std::string& target);
     void clear();
 
-    // Returns all targets matched by this message
-    std::vector<const MidiBinding*> resolve(const MidiLearnMsg& msg) const;
+    // Returns all bindings matched by this message (copies, safe across threads)
+    std::vector<MidiBinding> resolve(const MidiLearnMsg& msg) const;
 
     // Serialization
     std::string to_json() const;

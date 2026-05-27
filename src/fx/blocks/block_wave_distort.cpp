@@ -30,6 +30,7 @@ const std::vector<FxParam*> BlockWaveDistort::params() const {
 
 void BlockWaveDistort::process(PointBuffer& buf, float dt, const ExprContext& /*ctx*/) {
     anim_t_ += dt;
+    if (anim_t_ > 65536.f) anim_t_ -= 65536.f;
 
     const int   axis  = static_cast<int>(std::round(p_axis_.effective()));
     const float amp   = p_amplitude_.effective();
@@ -40,23 +41,29 @@ void BlockWaveDistort::process(PointBuffer& buf, float dt, const ExprContext& /*
     const float kInv   = 1.f / kScale;
     const float twopi  = static_cast<float>(2.0 * M_PI);
 
-    float t_phase = twopi * speed * anim_t_ + phase;
+    // M-22: wrap t_phase into [0, 2π) before passing to sin() — at high speed or
+    // long runtime anim_t_ can reach ~65535 → t_phase ~4M radians, well outside
+    // the range where IEEE 754 float sin() is accurate (significand has only ~7
+    // decimal digits of precision). fmod is cheap and keeps the argument small.
+    float t_phase = std::fmod(twopi * speed * anim_t_ + phase, twopi);
 
     for (LaserPoint& pt : buf) {
-        float nx = static_cast<float>(pt.x) * kInv;
-        float ny = static_cast<float>(pt.y) * kInv;
+        const float nx = static_cast<float>(pt.x) * kInv;
+        const float ny = static_cast<float>(pt.y) * kInv;
+        float out_x = nx;
+        float out_y = ny;
 
         if (axis == 0 || axis == 2) {
-            // Displace X based on Y coordinate
-            nx += amp * std::sin(ny * freq * twopi + t_phase);
+            // Displace X based on original Y coordinate
+            out_x += amp * std::sin(ny * freq * twopi + t_phase);
         }
         if (axis == 1 || axis == 2) {
-            // Displace Y based on X coordinate
-            ny += amp * std::sin(nx * freq * twopi + t_phase);
+            // Displace Y based on original X coordinate (not the modified out_x)
+            out_y += amp * std::sin(nx * freq * twopi + t_phase);
         }
 
-        pt.x = static_cast<int16_t>(std::clamp(nx, -1.f, 1.f) * kScale);
-        pt.y = static_cast<int16_t>(std::clamp(ny, -1.f, 1.f) * kScale);
+        pt.x = static_cast<int16_t>(std::clamp(out_x, -1.f, 1.f) * kScale);
+        pt.y = static_cast<int16_t>(std::clamp(out_y, -1.f, 1.f) * kScale);
     }
 }
 

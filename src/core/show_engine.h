@@ -23,6 +23,7 @@
 #include "../zones/zone_manager.h"
 #include "../safety/safety_manager.h"
 #include "../project/palette.h"
+#include "../project/project.h"
 #include <functional>
 #include <map>
 #include <memory>
@@ -40,7 +41,6 @@ namespace idhmfis {
 // Forward declarations
 class IGenerator;
 class AudioAnalyzer;
-struct Project;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  OutputStreamDef — typed output descriptor for multi-head output buses.
@@ -225,6 +225,12 @@ struct SetNdiConfig {
     bool        clock_video  = true;  // NDI-clocked timing vs. app-clocked
 };
 
+// Laser output optimizer tuning — sent when the user changes any value in
+// Setup > Output > Laser Output Quality and clicks Apply.
+struct SetOptimizerConfig {
+    OptimizerConfig cfg;
+};
+
 // Beam/glow raster params (also carries Otaniemi projector-mode overrides)
 struct SetRasterConfig {
     float beam_radius              = 2.5f;
@@ -310,6 +316,12 @@ struct TimelineWaitForGoAdvance { std::string id; };
 struct SetTimelineAudio   { std::string id; AudioTrackDef track; std::vector<float> peaks; }; // peaks precomputed by UI thread
 struct ClearTimelineAudio { std::string id; };
 
+// DMX universe base offset applied to all playback trigger lookups.
+// offset=0  — no adjustment (Chamsys-compatible default).
+// offset=-1 — shifts all configured universe numbers down by 1 (e.g. if the
+//             project stores universe 1 but Art-Net data arrives on universe 0).
+struct SetDmxUniverseOffset { int offset; };
+
 // Explicit programmer clear: wipes programmer_active_, all content, AND all per-stream latches.
 struct ClearProgrammer {};
 
@@ -354,7 +366,7 @@ using EngineCommand = std::variant<
     cmd::SetPlaybackCueGo, cmd::SetPlaybackCueBack, cmd::SetPlaybackJump,
     cmd::RecordToPlayback, cmd::UpdatePlaybackCue, cmd::DeletePlaybackCue,
     cmd::SetPlaybackDmxTrigger,
-    cmd::SetNdiConfig, cmd::SetRasterConfig,
+    cmd::SetNdiConfig, cmd::SetRasterConfig, cmd::SetOptimizerConfig,
     cmd::SetPlaybackConfig,
     cmd::SetProgrammerFrame,
     cmd::SetOutputEnable,
@@ -375,7 +387,8 @@ using EngineCommand = std::variant<
     cmd::SetTimecodeSettings, cmd::TimelineWaitForGoAdvance,
     cmd::SetTimelineAudio, cmd::ClearTimelineAudio,
     cmd::ClearProgrammer,
-    cmd::LatchProgrammer
+    cmd::LatchProgrammer,
+    cmd::SetDmxUniverseOffset
 >;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -555,6 +568,10 @@ public:
     void start();
     void stop();
 
+    // Attempt a watchdog-initiated restart: signals the engine thread to stop,
+    // waits up to 2 seconds for it to exit, then detaches if frozen, then starts fresh.
+    void restart();
+
     // Thread-safe command interface (called from UI/network threads)
     void send(EngineCommand cmd);
 
@@ -574,6 +591,11 @@ public:
 
     // Called from UI thread to get a snapshot of all timeline defs (tracks + events)
     std::vector<TimelineDef> read_timelines() const;
+
+    // Called from UI thread to get a thread-safe deep copy of the project for saving.
+    // Holds project_access_mtx_ during the copy to prevent engine command handlers from
+    // concurrently writing project_->full_cue_list or project_->playbacks[n].cuelist.
+    Project snapshot_project_for_save() const;
 
 private:
     void engine_loop();
@@ -625,6 +647,11 @@ private:
 
     DmxUniverse  dmx_[kMaxUniverses];
 
+    // DMX universe base offset applied to all playback DMX trigger lookups.
+    // 0 = no offset (default).  Shifts the universe number used to index dmx_[].
+    // Operator-adjustable via Setup > Network without recompile.
+    int          dmx_universe_offset_ = 0;
+
     // Protects extra_laser_buses_ against concurrent access from UI thread
     // (extra_laser_bus() call) and engine thread (SetOutputPatch handler).
     mutable std::mutex           extra_buses_mtx_;
@@ -636,6 +663,8 @@ private:
 
     std::atomic<bool>            running_{false};
     std::thread                  thread_;
+    // H-1: serialises start()/stop() — prevents concurrent double-start or join of non-joinable thread
+    mutable std::mutex           lifecycle_mtx_;
 
     uint64_t     frame_count_   = 0;
     HRTimer      frame_timer_;
@@ -698,6 +727,12 @@ private:
     // ── Chaser runtime state ──────────────────────────────────────────────────
     std::optional<ChaserRunState>  chaser_run_;
     std::atomic<uint32_t>               cuelist_version_{0};
+    // Guards project_->full_cue_list and project_->playbacks[n].cuelist.
+    // Held exclusively by process_commands() (engine thread) and
+    // snapshot_project_for_save() (UI thread) — prevents the save path from
+    // copying engine-owned fields while a command handler is writing them.
+    mutable std::mutex                  project_access_mtx_;
+
     mutable std::mutex                  cuelist_read_mtx_;
     std::vector<FullCueEntry>           cuelist_read_cache_;
     std::map<int, std::vector<FullCueEntry>> pb_cuelist_cache_;
@@ -717,12 +752,14 @@ private:
         float   fade_alpha   = 1.f;  // current fade-in alpha (0=start, 1=done)
         float   prev_alpha   = 0.f;  // fade-out alpha for previous cue (1=full, 0=gone)
         float   intensity    = 1.f;
-        bool    active       = false;
-        bool    blind        = false;
+        bool    active        = false;
+        bool    blind         = false;
+        bool    manual_active = false;  // set by UI GO press; prevents DMX from deactivating this playback
         uint8_t dmx_ch2_prev        = 0;     // previous ch2 value for TwoChannel rising-edge detection
         double  hold_start          = -1.0;  // time when current cue's hold phase started (-1 = not started)
         float   beat_phase          = 0.f;   // accumulator for go_at_bpm (0..1, wraps to advance cue)
         bool    first_trigger_done  = false; // true after the first GO; resets on STOP/CLEAR
+        float   gfx_smooth[32]      = {};    // per-playback CrossFade low-pass state for global FX
     };
     std::vector<PlaybackRunState>  playback_states_;
     int                            next_playback_id_{1};
@@ -798,8 +835,6 @@ private:
     GeneratorParams evaluated_params_{};
     bool            evaluated_params_valid_ = false; // true when a cue is active
 
-    float gfx_smooth_[32]{};   // per-slot smoothed GlobalFX value
-    float ffx_smooth_[32]{};   // per-slot smoothed FrameFX position value
 
     // Playback helper accessors (engine-thread only)
     PlaybackDef*      find_playback_def(int id);

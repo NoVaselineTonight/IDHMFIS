@@ -46,7 +46,11 @@ private:
     struct FramePool {
         std::array<RenderFrame, kPoolSize> frames;
         std::array<std::atomic_bool, kPoolSize> in_use{};
-        int next_free = 0;
+        // H-5: next_free is a search-start hint used in acquire(). Make it atomic
+        // so that any future caller from a different thread doesn't produce a data
+        // race. acquire() is currently engine-thread-only, but the defensive cost
+        // of an atomic relaxed load/store here is zero.
+        std::atomic<int> next_free{0};
 
         RenderFrame* acquire();
         void release(const RenderFrame* f);
@@ -56,7 +60,8 @@ private:
     // Both DAC and NDI use "latest frame" atomic swap — zero queued latency.
     std::atomic<RenderFrame*> dac_latest_{nullptr};
     std::atomic<RenderFrame*> ndi_latest_{nullptr};
-    RenderFrame*              ndi_prev_{nullptr};
+    // BUG #57 fix: ndi_prev_ was declared but never read or written — removed to
+    // prevent a future double-release trap if code were ever added to release via it.
 
     struct Stats {
         std::atomic<uint64_t> submitted{0};

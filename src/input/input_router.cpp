@@ -8,6 +8,7 @@
 #include "../core/logger.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <cstdio>
 #include <optional>
@@ -56,13 +57,35 @@ void InputRouter::start(const ArtNetConfig& artnet_cfg, int osc_port) {
 
     // MIDI: don't auto-open — caller calls midi().open(portName) explicitly
     log::info("InputRouter: started. Use midi().open() to connect MIDI device.");
+
+    // Start the self-tick thread.  tick() drains all input queues and forwards
+    // DMX/MIDI/OSC data to the engine via thread-safe MPSC queues.
+    // This thread MUST be started after the listeners so that it can safely
+    // forward to an already-running engine; it is stopped before the listeners
+    // in stop() so it never touches a half-torn-down listener.
+    tick_running_.store(true, std::memory_order_release);
+    tick_thread_ = std::thread([this]() {
+        using namespace std::chrono_literals;
+        while (tick_running_.load(std::memory_order_relaxed)) {
+            tick();
+            std::this_thread::sleep_for(1ms);   // ~1 kHz drain rate
+        }
+    });
+    log::info("InputRouter: tick thread started");
 }
 
 void InputRouter::stop() {
+    // Stop the self-tick thread FIRST — it pushes into the engine's queues,
+    // so it must be quiesced before any listener or engine teardown begins.
+    tick_running_.store(false, std::memory_order_release);
+    if (tick_thread_.joinable())
+        tick_thread_.join();
+
     artnet_.stop();
     sacn_.stop();
     midi_input_.close();
     osc_server_.stop();
+    log::info("InputRouter: stopped");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -148,7 +171,7 @@ bool InputRouter::osc_to_command(const OscServer::Message& msg,
         float bpm = msg.args_f.empty()
                     ? (msg.args_i.empty() ? 120.f : static_cast<float>(msg.args_i[0]))
                     : msg.args_f[0];
-        bpm = std::clamp(bpm, 20.f, 300.f);
+        bpm = std::clamp(bpm, 20.f, 2000.f);
         out_cmd = cmd::SetBPM{bpm};
         return true;
     }
@@ -434,16 +457,20 @@ bool InputRouter::midi_to_command(const MidiMessage& msg,
         lm.number  = static_cast<int>(msg.data1);   // CC number or note number
         lm.value   = static_cast<float>(msg.data2) / 127.f;  // normalise 0..127 → 0..1
 
-        // Pitch bend uses a 14-bit signed value; normalise -8192..+8191 → 0..1
+        // Pitch bend uses a 14-bit signed value; normalise -8192..+8191 → 0..1.
+        // Dividing by 8191 can produce a value slightly below 0 at the -8192
+        // extreme, so clamp to [0, 1] after the conversion.
         if (t == MidiMessage::kPitchBend) {
-            lm.value = (static_cast<float>(msg.pitch_bend()) / 8191.f + 1.f) * 0.5f;
+            lm.value = std::clamp(
+                (static_cast<float>(msg.pitch_bend()) / 8191.f + 1.f) * 0.5f,
+                0.f, 1.f);
         }
 
         {
-            const auto& bindings = engine_.midi_learn_map().resolve(lm);
-            for (const auto* b : bindings) {
-                float mapped = b->min_val + lm.value * (b->max_val - b->min_val);
-                if (auto cmd_opt = target_to_engine_command(b->target, mapped)) {
+            const auto bindings = engine_.midi_learn_map().resolve(lm);
+            for (const auto& b : bindings) {
+                float mapped = b.min_val + lm.value * (b.max_val - b.min_val);
+                if (auto cmd_opt = target_to_engine_command(b.target, mapped)) {
                     out_cmd = *cmd_opt;
                     return true;
                 }

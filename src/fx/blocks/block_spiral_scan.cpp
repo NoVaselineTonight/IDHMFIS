@@ -50,22 +50,9 @@ void BlockSpiralScan::process(PointBuffer& buf, float dt, const ExprContext& /*c
         float nx = static_cast<float>(pt.x) * kInv;
         float ny = static_cast<float>(pt.y) * kInv;
 
-        // Rotate
-        float rx = nx * ca - ny * sa;
-        float ry = nx * sa + ny * ca;
-
-        // Scale toward the spiral radius
-        float dist = std::hypot(rx, ry);
-        if (dist > 1e-6f) {
-            // Blend between original and spiral-scaled
-            rx = nx * ca - ny * sa;
-            ry = nx * sa + ny * ca;
-            // apply radius scaling as a secondary scale on the whole pattern
-            (void)(radius / dist); // scale factor reserved for future blend
-        }
-        // Apply rotation + scale
-        rx = nx * ca * radius - ny * sa * radius;
-        ry = nx * sa * radius + ny * ca * radius;
+        // Rotate and scale by the animated spiral radius
+        float rx = (nx * ca - ny * sa) * radius;
+        float ry = (nx * sa + ny * ca) * radius;
 
         pt.x = static_cast<int16_t>(std::clamp(rx, -1.f, 1.f) * kScale);
         pt.y = static_cast<int16_t>(std::clamp(ry, -1.f, 1.f) * kScale);

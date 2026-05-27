@@ -43,13 +43,15 @@ void BlockEnvelopeFollower::process(PointBuffer& buf, float dt, const ExprContex
 
     // 1-pole IIR envelope follower
     // Coefficient derived from time constant: coeff = exp(-dt / tau)
-    float coeff = 0.f;
-    if (input > envelope_) {
-        float tau = std::max(p_attack_.effective(), 1e-4f);
-        coeff = (dt > 0.f) ? std::exp(-dt / tau) : 0.f;
-    } else {
-        float tau = std::max(p_release_.effective(), 1e-4f);
-        coeff = (dt > 0.f) ? std::exp(-dt / tau) : 0.f;
+    float coeff = 1.f;
+    if (dt > 0.f) {
+        if (input > envelope_) {
+            float tau = std::max(p_attack_.effective(), 1e-4f);
+            coeff = std::exp(-dt / tau);
+        } else {
+            float tau = std::max(p_release_.effective(), 1e-4f);
+            coeff = std::exp(-dt / tau);
+        }
     }
     envelope_ = coeff * envelope_ + (1.f - coeff) * input;
 

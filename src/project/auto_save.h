@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <string>
+#include <vector>
 
 namespace idhmfis {
 
@@ -40,6 +41,10 @@ public:
 
     // Called on clean shutdown to remove the lock sentinel
     void on_clean_shutdown(const std::string& base_path);
+
+    // Scan the system temp directory for autosave files left by crashed instances.
+    // Checks each candidate PID — only returns files whose process is no longer running.
+    static std::vector<std::string> scan_orphaned_autosaves();
 
     // True if a save is currently due (project dirty and interval elapsed)
     bool is_due() const;

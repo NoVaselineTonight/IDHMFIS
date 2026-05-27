@@ -41,13 +41,18 @@ void BlockKaleidoscope::process(PointBuffer& buf, float dt, const ExprContext& /
         float angle  = std::atan2(ny, nx) + aoffs;
         float radius = std::hypot(nx, ny);
 
+        // Determine which sector the original angle falls into (for flip_odd parity)
+        float raw_angle = std::atan2(ny, nx) + aoffs;
+        // Wrap raw_angle into [0, 2pi) before dividing into sectors
+        float full_circle = static_cast<float>(2.0 * M_PI);
+        raw_angle = std::fmod(raw_angle, full_circle);
+        if (raw_angle < 0.f) raw_angle += full_circle;
+        int sector_idx = static_cast<int>(raw_angle / sector);
+        bool odd = (sector_idx & 1) != 0;
+
         // Wrap angle into [0, sector)
         angle = std::fmod(angle, sector);
         if (angle < 0.f) angle += sector;
-
-        // Mirror within the sector
-        int sector_idx = static_cast<int>((std::atan2(ny, nx) + aoffs) / sector);
-        bool odd = (sector_idx & 1) != 0;
 
         if (angle > half) {
             angle = sector - angle;

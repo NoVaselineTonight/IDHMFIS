@@ -52,7 +52,9 @@ void FxEngine::process(PointBuffer& buf, float dt, const ExprContext& ctx) {
     for (auto& blk : blocks_) {
         if (!blk || !blk->enabled || blk->bypassed) continue;
 
-        const float w = blk->wet;
+        // H-20: clamp wet to [0,1] — modulation can drive it out of range,
+        // which would invert the blend or produce > 100% wet, corrupting output.
+        const float w = std::clamp(blk->wet, 0.f, 1.f);
         if (w <= 0.f) continue;
 
         if (w >= 1.f) {

@@ -28,6 +28,9 @@ namespace idhmfis {
 extern AudioSnapshot g_last_audio_snap;
 extern void set_ilda_path(const std::string&);
 
+// Mutex protecting g_last_audio_snap against concurrent reads from generator threads.
+static std::mutex g_audio_snap_mtx;
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  ShowEngine constructor / destructor
 // ─────────────────────────────────────────────────────────────────────────────
@@ -66,6 +69,9 @@ ShowEngine::~ShowEngine()
 // ─────────────────────────────────────────────────────────────────────────────
 void ShowEngine::start()
 {
+    // H-1: lifecycle_mtx_ prevents concurrent start() calls from both passing
+    // the running_ check and spawning two engine threads.
+    std::lock_guard<std::mutex> lk(lifecycle_mtx_);
     if (running_.load(std::memory_order_acquire)) return;
     running_.store(true, std::memory_order_release);
     thread_ = std::thread(&ShowEngine::engine_loop, this);
@@ -76,10 +82,36 @@ void ShowEngine::start()
 
 void ShowEngine::stop()
 {
+    // H-1: lifecycle_mtx_ prevents a concurrent stop() from calling join() on a
+    // thread that is already joined or not yet joinable.
+    std::lock_guard<std::mutex> lk(lifecycle_mtx_);
     if (!running_.load(std::memory_order_acquire)) return;
     running_.store(false, std::memory_order_release);
     if (thread_.joinable()) thread_.join();
     log::info("ShowEngine stopped");
+}
+
+void ShowEngine::restart()
+{
+    // Signal the engine thread to stop, wait up to 2 seconds, then detach if frozen.
+    std::lock_guard<std::mutex> lk(lifecycle_mtx_);
+    if (running_.load(std::memory_order_acquire)) {
+        running_.store(false, std::memory_order_release);
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (thread_.joinable() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (thread_.joinable()) {
+            log::warn("ShowEngine::restart: engine thread frozen — detaching");
+            thread_.detach(); // frozen — abandon old thread
+        }
+    }
+    // Start a fresh engine thread.
+    running_.store(true, std::memory_order_release);
+    thread_ = std::thread(&ShowEngine::engine_loop, this);
+    set_thread_priority(thread_, ThreadPriority::High);
+    set_thread_name("idhmfis-engine");
+    log::info("ShowEngine restarted");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,7 +135,9 @@ void ShowEngine::push_dmx(int universe, const DmxUniverse& data)
 EngineSnapshot ShowEngine::snapshot() const
 {
     std::lock_guard<std::mutex> lk(snap_mtx_);
-    int ri = 1 - snap_write_idx_.load(std::memory_order_relaxed);
+    // C-2: acquire pairs with the release in update_snapshot() for correct
+    // visibility of snap_[] contents written before the index flip.
+    int ri = 1 - snap_write_idx_.load(std::memory_order_acquire);
     return snap_[ri];
 }
 
@@ -130,6 +164,11 @@ void ShowEngine::engine_loop()
 
     while (running_.load(std::memory_order_acquire))
     {
+        // C-1: guard the entire tick body against exceptions so a bug in any
+        // subsystem (generators, FX, command handlers, …) cannot kill the engine
+        // thread — it logs the error and continues ticking at the next deadline.
+        try
+        {
         double now_s = HRTimer::now_s();
         double dt    = now_s - prev_time;
         prev_time    = now_s;
@@ -262,6 +301,17 @@ void ShowEngine::engine_loop()
             // We overran — reset deadline to avoid catching up for many frames.
             next_tick = Clock::now();
         }
+
+        } // end try
+        catch (const std::exception& ex) {
+            log::error("ShowEngine: exception in engine loop: %s", ex.what());
+            // Reset deadline so we don't cascade overruns after the exception.
+            next_tick = Clock::now();
+        }
+        catch (...) {
+            log::error("ShowEngine: unknown exception in engine loop");
+            next_tick = Clock::now();
+        }
     }
 }
 
@@ -375,7 +425,7 @@ PointBuffer ShowEngine::render_keyframe_layer(const KeyframeLayer& kf, int targe
         static constexpr float kTwoPi = 6.28318f;
         if (obj.type == LaserObjectType::Dot) {
             // Dot: render as a small circle at pts[0] with radius obj.size
-            int circle_pts = std::max(8, target_pts / static_cast<int>(kf.objects.size() + 1));
+            int circle_pts = std::max(8, target_pts / std::max(1, static_cast<int>(kf.objects.size()) + 1));
             for (int ci = 0; ci <= circle_pts; ++ci) {
                 float a  = kTwoPi * static_cast<float>(ci) / static_cast<float>(circle_pts);
                 float cx = obj.pts[0].x + obj.size * std::cos(a);
@@ -690,7 +740,17 @@ static void apply_frame_fx(PointBuffer& buf, const FxLayer& layer, float t) {
             if (pt.blanked) { prev = true; continue; }
             if (prev)       { ++seg; prev = false; }
 
-            float dir_off   = direction_phase(e.direction, seg, centroids, e.dir_width, e.parts, e.segs);
+            // Bug 23: direction_phase() returns 0 when centroids.size()<=1 (all single-segment
+            // generators: waves, lines, etc.).  For those cases use the point's own X position
+            // as the phase carrier so Spread (dir_width) has a visible effect.
+            float dir_off;
+            if (n_segs <= 1 && e.direction != FxDirection::Sync && e.dir_width > 0.f) {
+                float pos_phase = pt.nx() * 0.5f + 0.5f;  // 0..1 left-to-right
+                const int p_m = std::max(1, e.parts);
+                dir_off = std::fmod(pos_phase * static_cast<float>(p_m), 1.f) * e.dir_width;
+            } else {
+                dir_off = direction_phase(e.direction, seg, centroids, e.dir_width, e.parts, e.segs);
+            }
             float raw_phase = t * e.rate + e.offset + dir_off;
             float phase     = std::fmod(raw_phase, 1.f);
             if (phase < 0.f) phase += 1.f;
@@ -784,21 +844,38 @@ static void apply_frame_fx(PointBuffer& buf, const FxLayer& layer, float t) {
             }
             case FrameFxType::Col2: {
                 if (e.use_custom_colors) {
-                    // Crossfade or snap between col_a and col_b
+                    // Cycle A→B→A with crossfade at BOTH transitions (A→B and B→A).
+                    // Use the same segment approach as Col3/Col4: divide phase into 2 equal
+                    // segments and crossfade at the end of each segment so both the A→B
+                    // (phase≈0.5) and B→A (phase≈0/1 wrap) transitions are smooth.
+                    // Bug fix: the previous midpoint-only formula only crossfaded A→B and
+                    // snapped the B→A wrap transition.
+                    float seg_phase2 = phase * 2.f;
+                    int   seg_idx2   = static_cast<int>(seg_phase2);
+                    if (seg_idx2 >= 2) seg_idx2 = 1;
+                    float local_t2   = seg_phase2 - static_cast<float>(seg_idx2);
+
                     float t_blend;
                     if (e.crossfade > 0.001f) {
-                        float half_cf = e.crossfade * 0.25f;  // crossfade zone half-width
-                        float dist = std::abs(phase - 0.5f);
-                        if (dist > half_cf)
-                            t_blend = (phase >= 0.5f) ? 1.f : 0.f;
-                        else
-                            t_blend = 0.5f + (phase - 0.5f) / (2.f * half_cf) * 0.5f;
+                        float half_cf2 = e.crossfade * 0.5f;
+                        t_blend = (local_t2 > 1.f - half_cf2)
+                            ? std::clamp((local_t2 - (1.f - half_cf2)) / (2.f * half_cf2), 0.f, 1.f)
+                            : 0.f;
                     } else {
-                        t_blend = (phase >= 0.5f) ? 1.f : 0.f;
+                        t_blend = 0.f;
                     }
-                    pt.r = static_cast<uint8_t>(std::clamp((e.col_a_r + t_blend * (e.col_b_r - e.col_a_r)) * 255.f, 0.f, 255.f));
-                    pt.g = static_cast<uint8_t>(std::clamp((e.col_a_g + t_blend * (e.col_b_g - e.col_a_g)) * 255.f, 0.f, 255.f));
-                    pt.b = static_cast<uint8_t>(std::clamp((e.col_a_b + t_blend * (e.col_b_b - e.col_a_b)) * 255.f, 0.f, 255.f));
+                    // seg 0: A→B; seg 1: B→A
+                    float ca_r, ca_g, ca_b, cb_r, cb_g, cb_b;
+                    if (seg_idx2 == 0) {
+                        ca_r = e.col_a_r; ca_g = e.col_a_g; ca_b = e.col_a_b;
+                        cb_r = e.col_b_r; cb_g = e.col_b_g; cb_b = e.col_b_b;
+                    } else {
+                        ca_r = e.col_b_r; ca_g = e.col_b_g; ca_b = e.col_b_b;
+                        cb_r = e.col_a_r; cb_g = e.col_a_g; cb_b = e.col_a_b;
+                    }
+                    pt.r = static_cast<uint8_t>(std::clamp((ca_r + t_blend * (cb_r - ca_r)) * 255.f, 0.f, 255.f));
+                    pt.g = static_cast<uint8_t>(std::clamp((ca_g + t_blend * (cb_g - ca_g)) * 255.f, 0.f, 255.f));
+                    pt.b = static_cast<uint8_t>(std::clamp((ca_b + t_blend * (cb_b - ca_b)) * 255.f, 0.f, 255.f));
                 } else {
                     // Square-wave between object colour and hue-shifted colour.
                     // depth = hue rotation 0..1 (0.5 = complementary).
@@ -831,6 +908,7 @@ static void apply_frame_fx(PointBuffer& buf, const FxLayer& layer, float t) {
                     float blend_t;
                     if (e.crossfade > 0.001f) {
                         float half_cf = e.crossfade * 0.5f;  // crossfade zone at end of segment
+                        half_cf = std::max(half_cf, 1e-6f);
                         if (local_t < (1.f - half_cf))
                             blend_t = 0.f;
                         else
@@ -897,6 +975,7 @@ static void apply_frame_fx(PointBuffer& buf, const FxLayer& layer, float t) {
                     float blend_t;
                     if (e.crossfade > 0.001f) {
                         float half_cf = e.crossfade * 0.5f;
+                        half_cf = std::max(half_cf, 1e-6f);
                         blend_t = (local_t < (1.f - half_cf)) ? 0.f : (local_t - (1.f - half_cf)) / half_cf;
                     } else {
                         blend_t = 0.f;
@@ -937,6 +1016,7 @@ static void apply_frame_fx(PointBuffer& buf, const FxLayer& layer, float t) {
                     float blend_t;
                     if (e.crossfade > 0.001f) {
                         float half_cf = e.crossfade * 0.5f;
+                        half_cf = std::max(half_cf, 1e-6f);
                         blend_t = (local_t < (1.f - half_cf)) ? 0.f : (local_t - (1.f - half_cf)) / half_cf;
                     } else {
                         blend_t = 0.f;
@@ -1050,6 +1130,12 @@ static void apply_global_layer(PointBuffer& buf, const GlobalLayer& gl, float t,
 // ─────────────────────────────────────────────────────────────────────────────
 void ShowEngine::process_commands()
 {
+    // Hold project_access_mtx_ for the entire duration of command processing.
+    // This prevents snapshot_project_for_save() (UI thread) from copying
+    // project_->full_cue_list or project_->playbacks[n].cuelist while a command
+    // handler is writing them (e.g. RecordToPlayback, sync_cuelist_to_project).
+    std::lock_guard<std::mutex> proj_lk(project_access_mtx_);
+
     EngineCommand cmd;
     while (cmd_queue_.try_pop(cmd))
     {
@@ -1085,7 +1171,7 @@ void ShowEngine::process_commands()
                 point_rate_ = std::clamp(c.pps, kMinPointRate, kMaxPointRate);
             }
             else if constexpr (std::is_same_v<T, cmd::SetBPM>) {
-                bpm_ = std::clamp(c.bpm, 20.f, 300.f);
+                bpm_ = std::clamp(c.bpm, 20.f, 2000.f);
             }
             else if constexpr (std::is_same_v<T, cmd::ActivateCue>) {
                 if (project_ && c.slot >= 0
@@ -1216,22 +1302,28 @@ void ShowEngine::process_commands()
                 log::debug("Engine: Seek -> %.3f s", time_);
             }
             else if constexpr (std::is_same_v<T, cmd::GoNext>) {
-                if (project_ && !project_->cue_list.empty()) {
+                // H-3: use cue_list_ (the live state machine) instead of
+                // project_->cue_list (the legacy array that may be out of sync
+                // after add/delete/move operations).
+                int cnt = cue_list_.entry_count();
+                if (cnt > 0) {
                     int next = cue_list_idx_ + 1;
-                    if (next < (int)project_->cue_list.size()) {
+                    if (next < cnt) {
                         cue_list_idx_ = next;
-                        const auto& entry = project_->cue_list[cue_list_idx_];
-                        int ci = project_->find_cue(entry.cue_id);
+                        const auto& fe = cue_list_.entry_at(next);
+                        int ci = project_ ? project_->find_cue(fe.cue_id) : -1;
                         if (ci >= 0) { active_cue_ = ci; time_ = 0.0; fade_level_ = 0.0f; }
                     }
                 }
             }
             else if constexpr (std::is_same_v<T, cmd::GoPrev>) {
-                if (project_ && !project_->cue_list.empty() && cue_list_idx_ > 0) {
+                // H-3: same fix — use cue_list_ not project_->cue_list
+                int cnt = cue_list_.entry_count();
+                if (cnt > 0 && cue_list_idx_ > 0) {
                     int prev = cue_list_idx_ - 1;
                     cue_list_idx_ = prev;
-                    const auto& entry = project_->cue_list[cue_list_idx_];
-                    int ci = project_->find_cue(entry.cue_id);
+                    const auto& fe = cue_list_.entry_at(prev);
+                    int ci = project_ ? project_->find_cue(fe.cue_id) : -1;
                     if (ci >= 0) { active_cue_ = ci; time_ = 0.0; fade_level_ = 0.0f; }
                 }
             }
@@ -1368,11 +1460,21 @@ void ShowEngine::process_commands()
                     cue_list_.remove_entry(c.idx);
                     if (project_ && !cue_id.empty()) {
                         auto& cv = project_->cues;
+                        // H-4: record the position of the cue BEFORE erasing so
+                        // we erase the matching FxEngine slot, not the last one.
+                        // The old resize(cv.size()) only truncated from the end,
+                        // leaving a stale engine in the middle of the vector.
+                        int erase_pos = -1;
+                        for (int i = 0; i < static_cast<int>(cv.size()); ++i) {
+                            if (cv[i].id == cue_id) { erase_pos = i; break; }
+                        }
                         cv.erase(std::remove_if(cv.begin(), cv.end(),
                             [&](const Cue& cue){ return cue.id == cue_id; }),
                             cv.end());
-                        // Resize FX engine vector to match
-                        if (cue_fx_engines_.size() > cv.size())
+                        // Erase the corresponding FX engine slot at the same position.
+                        if (erase_pos >= 0 && erase_pos < static_cast<int>(cue_fx_engines_.size()))
+                            cue_fx_engines_.erase(cue_fx_engines_.begin() + erase_pos);
+                        else if (cue_fx_engines_.size() > cv.size())
                             cue_fx_engines_.resize(cv.size());
                     }
                     cue_list_idx_ = cue_list_.current_idx();
@@ -1454,7 +1556,9 @@ void ShowEngine::process_commands()
                 ScanFailMonitor::Config cfg = safety_.scan_fail.config();
                 cfg.enabled = c.enabled;
                 safety_.scan_fail.configure(cfg);
-                if (!c.enabled) safety_.scan_fail.reset();
+                // Do NOT reset() the latch here — a triggered scan-fail must be
+                // acknowledged by the operator via cmd::ResetScanFail, not silently
+                // cleared by toggling the enable switch (IEC 60825-1 requirement).
                 log::info("Engine: scan-fail protection %s", c.enabled ? "enabled" : "disabled");
             }
             // ── Quick Show commands ───────────────────────────────────────────
@@ -1547,8 +1651,11 @@ void ShowEngine::process_commands()
                     active_position_slot_ = c.slot;
             }
             else if constexpr (std::is_same_v<T, cmd::PatchDmxChannel>) {
-                if (c.universe >= 0 && c.universe < kMaxUniverses && c.channel >= 0 && c.channel < 512)
-                    dmx_[c.universe][c.channel] = c.value;
+                // c.channel is 1-based (1..512) matching the UI DragInt range.
+                // Convert to 0-based array index; validate as 1-based.
+                if (c.universe >= 0 && c.universe < kMaxUniverses &&
+                    c.channel >= 1 && c.channel <= 512)
+                    dmx_[c.universe][c.channel - 1] = c.value;
             }
             else if constexpr (std::is_same_v<T, cmd::SetArtNetOutput>) {
                 artnet_out_.set_target(c.ip);
@@ -1573,6 +1680,7 @@ void ShowEngine::process_commands()
                 }
             }
             else if constexpr (std::is_same_v<T, cmd::NewChaserCue>) {
+                if (!project_) return;
                 // Create a new FullCueEntry that is a chaser
                 FullCueEntry fce;
                 fce.name       = c.name;
@@ -1590,15 +1698,16 @@ void ShowEngine::process_commands()
                 int new_idx = static_cast<int>(project_->cues.size());
                 project_->cues.push_back(pe);
                 fce.cue_id = project_->cues[static_cast<size_t>(new_idx)].id;
-                fce.number.major = new_idx + 1;
+                fce.number.major = cue_list_.entry_count() + 1;
                 fce.number.minor = 0;
-                project_->full_cue_list.push_back(fce);
+                cue_list_.add_entry(fce);
                 // Also resize fx engines
                 cue_fx_engines_.resize(project_->cues.size());
                 sync_cuelist_to_project();
             }
             // ── Playback management commands ──────────────────────────────────
             else if constexpr (std::is_same_v<T, cmd::NewPlayback>) {
+                if (!project_) return;
                 PlaybackDef pb;
                 pb.id   = next_playback_id_++;
                 pb.name = c.name;
@@ -1658,7 +1767,8 @@ void ShowEngine::process_commands()
                 auto* rs = find_playback_state(c.id);
                 auto* pb = find_playback_def(c.id);
                 if (rs) {
-                    rs->active = false;
+                    rs->active        = false;
+                    rs->manual_active = false;  // manual Stop clears manual override
                     rs->first_trigger_done = false;
                     // Reset cuelist position unless "remember position" is enabled
                     if (pb && !pb->config.remember_cuelist_position)
@@ -1671,7 +1781,7 @@ void ShowEngine::process_commands()
             }
             else if constexpr (std::is_same_v<T, cmd::SetPlaybackClear>) {
                 auto* rs = find_playback_state(c.id);
-                if (rs) { rs->current_idx = -1; rs->active = false; rs->first_trigger_done = false; }
+                if (rs) { rs->current_idx = -1; rs->active = false; rs->manual_active = false; rs->first_trigger_done = false; }
                 auto* pb = find_playback_def(c.id);
                 if (pb) pb->active = false;
             }
@@ -1695,6 +1805,9 @@ void ShowEngine::process_commands()
                 auto* rs = find_playback_state(c.id);
                 auto* pb = find_playback_def(c.id);
                 if (rs && pb && !pb->cuelist.empty()) {
+                    // Manual GO press — mark as manually activated so DMX cannot
+                    // deactivate this playback while the operator wants it running.
+                    rs->manual_active = true;
                     if (!rs->active) {
                         // Not active: activate and jump to cue 0 (or resume at current position)
                         if (rs->current_idx < 0)
@@ -1886,6 +1999,9 @@ void ShowEngine::process_commands()
                     sp.has_content  = !c.objects.objects.empty();
                 }
             }
+            else if constexpr (std::is_same_v<T, cmd::SetDmxUniverseOffset>) {
+                dmx_universe_offset_ = c.offset;
+            }
             else if constexpr (std::is_same_v<T, cmd::SetNdiConfig>) {
                 // If the patch system already owns an NDI stream, the legacy sender
                 // must stay off — re-enabling it would create a duplicate source.
@@ -1905,6 +2021,10 @@ void ShowEngine::process_commands()
                 } else {
                     ndi_enabled_.store(c.enabled, std::memory_order_relaxed);
                     if (c.enabled) {
+                        if (c.width <= 0 || c.width > 8192 || c.height <= 0 || c.height > 8192) {
+                            log::error("NDI: invalid dimensions {}x{}, ignoring", c.width, c.height);
+                            return;
+                        }
                         ndi_width_  = c.width;
                         ndi_height_ = c.height;
                         ndi_fps_N_  = std::max(1, c.fps_N);
@@ -1927,6 +2047,14 @@ void ShowEngine::process_commands()
                 raster_cfg_.otaniemi_brightness_boost= c.otaniemi_brightness_boost;
                 raster_cfg_.otaniemi_glow_radius     = c.otaniemi_glow_radius;
                 raster_cfg_.otaniemi_auto_fill       = c.otaniemi_auto_fill;
+            }
+            else if constexpr (std::is_same_v<T, cmd::SetOptimizerConfig>) {
+                point_optimizer_.set_config(c.cfg);
+                log::info("Engine: OptimizerConfig applied (pps=%d blank=%.0f corner=%.0f thresh=%.3f reorder=%d)",
+                          c.cfg.target_pps, static_cast<double>(c.cfg.blank_dwell),
+                          static_cast<double>(c.cfg.corner_dwell),
+                          static_cast<double>(c.cfg.corner_angle_threshold),
+                          (int)c.cfg.enable_reorder);
             }
             else if constexpr (std::is_same_v<T, cmd::SetOutputEnable>) {
                 output_enabled_ = c.enabled;
@@ -2183,6 +2311,7 @@ void ShowEngine::process_commands()
             }
             else if constexpr (std::is_same_v<T, cmd::TimelineStop>) {
                 timeline_engine_.stop(c.id);
+                timeline_engine_.clear_record_armed(c.id);
                 timeline_audio_player_.stop();
             }
             else if constexpr (std::is_same_v<T, cmd::TimelineRewind>) {
@@ -2351,6 +2480,7 @@ void ShowEngine::record_event_to_armed_timelines(TimelineEventType type,
         if (defp->tracks.empty()) continue; // still empty after auto-create: skip
 
         // Auto-start playback on the first recorded event so position advances.
+        if (i >= rsnaps.size()) break;
         if (rsnaps[i].state == TimelineState::Idle)
             timeline_engine_.play(def_ids[i]);
 
@@ -2469,18 +2599,22 @@ void ShowEngine::process_dmx_input()
         for (auto& def : project_->playbacks) {
             if (def.config.dmx_mode == PlaybackConfig::DmxMode::Off) continue;
 
-            int univ = def.config.dmx_universe;
-            int ch   = def.config.dmx_channel;
-            if (univ < 0 || univ >= kMaxUniverses || ch < 0 || ch >= 512) continue;
+            int univ   = def.config.dmx_universe + dmx_universe_offset_;  // offset shifts universe only
+            int ch     = def.config.dmx_channel;                          // 1-based (1..512)
+            int ch_idx = ch - 1;                                          // convert to 0-based array index
+            if (univ < 0 || univ >= kMaxUniverses || ch < 1 || ch > 512) continue;
+            if (ch_idx < 0 || ch_idx >= 512) continue;
 
-            uint8_t ch1_val = dmx_[univ].ch[static_cast<size_t>(ch)];
+            uint8_t ch1_val = dmx_[univ].ch[static_cast<size_t>(ch_idx)];
 
             auto* state = find_playback_state(def.id);
             if (!state) continue;
 
             if (def.config.dmx_mode == PlaybackConfig::DmxMode::OneChannel) {
                 // ch1 > threshold = active (intensity from ch1 value)
-                bool should_be_active = (ch1_val > def.config.dmx_threshold);
+                // manual_active keeps the playback alive even when DMX is low —
+                // only a manual Stop (SetPlaybackStop) clears it.
+                bool should_be_active = (ch1_val > def.config.dmx_threshold) || state->manual_active;
                 if (should_be_active && !state->active) {
                     state->active    = true;
                     state->intensity = static_cast<float>(ch1_val) / 255.f;
@@ -2491,14 +2625,16 @@ void ShowEngine::process_dmx_input()
                     }
                 } else if (!should_be_active && state->active) {
                     state->active = false;
-                } else if (should_be_active) {
+                } else if (should_be_active && ch1_val > def.config.dmx_threshold) {
+                    // Only update intensity from DMX when DMX is actually sending value
                     state->intensity = static_cast<float>(ch1_val) / 255.f;
                 }
                 def.active = state->active;  // mirror to PlaybackDef for UI snapshot
             } else { // TwoChannel
                 // ch1 = on/off intensity, ch2 = GO trigger (rising edge)
-                uint8_t ch2_val = (ch + 1 < 512) ? dmx_[univ].ch[static_cast<size_t>(ch + 1)] : 0;
-                bool ch1_active = (ch1_val > def.config.dmx_threshold);
+                // manual_active keeps the playback alive even when DMX ch1 is low.
+                uint8_t ch2_val = (ch_idx + 1 < 512) ? dmx_[univ].ch[static_cast<size_t>(ch_idx + 1)] : 0;
+                bool ch1_active = (ch1_val > def.config.dmx_threshold) || state->manual_active;
                 if (ch1_active) {
                     if (!state->active && state->current_idx < 0) {
                         auto* def_m = find_playback_def(def.id);
@@ -2552,10 +2688,12 @@ void ShowEngine::evaluate_cues(double t, double /*dt*/)
     // ── Apply DMX patches ─────────────────────────────────────────────────
     for (const DmxPatch& patch : project_->dmx_patches)
     {
+        if (patch.universe < 0 || patch.universe >= kMaxUniverses) continue;
         const DmxUniverse& uni = dmx_[patch.universe];
         for (const auto& ch : patch.profile.channels)
         {
             int addr = patch.start_addr + ch.offset - 1;
+            if (addr < 0 || addr > 511) continue;
             float norm = uni.norm(addr); // 0..1
             float val  = ch.scale_min + norm * (ch.scale_max - ch.scale_min);
             const std::string& n = ch.param_name;
@@ -2603,6 +2741,7 @@ void ShowEngine::evaluate_cues(double t, double /*dt*/)
         }
         else if (track.dmx_mapped)
         {
+            if (track.dmx_universe < 0 || track.dmx_universe >= kMaxUniverses) continue;
             const DmxUniverse& uni = dmx_[track.dmx_universe];
             val = uni.norm(track.dmx_channel);
         }
@@ -2634,12 +2773,15 @@ void ShowEngine::evaluate_cues(double t, double /*dt*/)
     evaluated_params_valid_ = true;
 
     // ── Chaser step advance ──────────────────────────────────────────────────
-    // Find the FullCueEntry by cue_id (not by active_cue_ index — different vectors)
+    // Find the FullCueEntry by cue_id using cue_list_ (engine-thread-owned) instead
+    // of project_->full_cue_list to avoid a data race with the UI save path.
     const FullCueEntry* ace_ptr = nullptr;
     if (active_cue_ >= 0 && active_cue_ < static_cast<int>(project_->cues.size())) {
         const std::string& target_id = project_->cues[static_cast<size_t>(active_cue_)].id;
-        for (const auto& fce : project_->full_cue_list)
+        for (int ei = 0; ei < cue_list_.entry_count(); ++ei) {
+            const auto& fce = cue_list_.entry_at(ei);
             if (fce.cue_id == target_id) { ace_ptr = &fce; break; }
+        }
     }
     if (ace_ptr) {
         const auto& ace = *ace_ptr;
@@ -2703,7 +2845,7 @@ void ShowEngine::build_frame()
     if (!p.blanked)
     {
     // ── Update audio bridge for audio-reactive generators ─────────────────
-    g_last_audio_snap = audio_.snapshot();
+    { std::lock_guard<std::mutex> lk(g_audio_snap_mtx); g_last_audio_snap = audio_.snapshot(); }
 
     // ── Update ILDA path if this is an ILDA cue ───────────────────────────
     if (cue.generator == GeneratorType::ILDASequence && !cue.ilda_path.empty())
@@ -2916,10 +3058,18 @@ void ShowEngine::build_frame()
                                                ? fx_it->second : fce.fx_layer;
                     apply_frame_fx(stream_pts, stream_fx, fx_t);
                     apply_global_geometry(stream_pts, fce.global_layer);
-                    apply_global_layer(stream_pts, fce.global_layer, fx_t, pb_intensity, gfx_smooth_);
-                    if (!fce.mirrored_ids.empty() &&
-                        std::find(fce.mirrored_ids.begin(), fce.mirrored_ids.end(), sid) != fce.mirrored_ids.end())
-                        for (auto& pt : stream_pts) pt.x = -pt.x;
+                    apply_global_layer(stream_pts, fce.global_layer, fx_t, pb_intensity, rs.gfx_smooth);
+                    // Apply per-cue mirroring only when live group mirroring is NOT
+                    // already active for this stream.  If both applied simultaneously
+                    // they double-invert (net no flip), which is the mirror-playback bug.
+                    {
+                        bool cue_mir  = !fce.mirrored_ids.empty() &&
+                            std::find(fce.mirrored_ids.begin(), fce.mirrored_ids.end(), sid) != fce.mirrored_ids.end();
+                        bool live_mir = !mirrored_stream_ids_.empty() &&
+                            std::find(mirrored_stream_ids_.begin(), mirrored_stream_ids_.end(), sid) != mirrored_stream_ids_.end();
+                        if (cue_mir && !live_mir)
+                            for (auto& pt : stream_pts) pt.x = -pt.x;
+                    }
                     for (const auto& pt : stream_pts)
                         per_stream_extras[sid].push_back(pt);
                 }
@@ -2930,16 +3080,41 @@ void ShowEngine::build_frame()
                     PointBuffer morph_pts = render_keyframe_layer(morphed, 256);
                     apply_frame_fx(morph_pts, fce.fx_layer, fx_t);
                     apply_global_geometry(morph_pts, fce.global_layer);
-                    apply_global_layer(morph_pts, fce.global_layer, fx_t, pb_intensity, gfx_smooth_);
-                    if (assigned.empty()) {
+                    apply_global_layer(morph_pts, fce.global_layer, fx_t, pb_intensity, rs.gfx_smooth);
+                    if (assigned.empty() && fce.mirrored_ids.empty()) {
+                        // No per-stream routing needed: push to global composite buffer.
                         for (auto& pt : morph_pts)
                             points.push_back(pt);
+                    } else if (assigned.empty()) {
+                        // No explicit assignment but per-cue mirroring is active: fan out
+                        // per-stream so each mirrored stream receives a flipped copy.
+                        // Guard: skip pre-flip for streams where live group mirror is active
+                        // (the fanout will flip via mirrored_stream_ids_; pre-flipping here
+                        // would double-invert to no flip — the mirror-playback bug).
+                        for (int sid : effective_ids) {
+                            bool is_mir  = std::find(fce.mirrored_ids.begin(),
+                                                      fce.mirrored_ids.end(), sid)
+                                           != fce.mirrored_ids.end();
+                            bool live_mir = !mirrored_stream_ids_.empty() &&
+                                std::find(mirrored_stream_ids_.begin(), mirrored_stream_ids_.end(), sid) != mirrored_stream_ids_.end();
+                            if (!is_mir || live_mir) {
+                                for (const auto& pt : morph_pts)
+                                    per_stream_extras[sid].push_back(pt);
+                            } else {
+                                for (auto pt : morph_pts) {
+                                    pt.x = static_cast<int16_t>(-pt.x);
+                                    per_stream_extras[sid].push_back(pt);
+                                }
+                            }
+                        }
                     } else {
                         for (int sid : assigned) {
-                            bool is_mir = !fce.mirrored_ids.empty() &&
-                                          std::find(fce.mirrored_ids.begin(), fce.mirrored_ids.end(), sid) != fce.mirrored_ids.end();
+                            bool is_mir  = !fce.mirrored_ids.empty() &&
+                                           std::find(fce.mirrored_ids.begin(), fce.mirrored_ids.end(), sid) != fce.mirrored_ids.end();
+                            bool live_mir = !mirrored_stream_ids_.empty() &&
+                                std::find(mirrored_stream_ids_.begin(), mirrored_stream_ids_.end(), sid) != mirrored_stream_ids_.end();
                             for (auto pt : morph_pts) {   // copy by value
-                                if (is_mir) pt.x = static_cast<int16_t>(-pt.x);
+                                if (is_mir && !live_mir) pt.x = static_cast<int16_t>(-pt.x);
                                 per_stream_extras[sid].push_back(pt);
                             }
                         }
@@ -2954,7 +3129,11 @@ void ShowEngine::build_frame()
 
             // Start hold timer on the first tick after fade completes
             if (rs.hold_start < 0.0) rs.hold_start = 0.0;
-            rs.hold_start += static_cast<double>(last_dt_);
+            // H-2: only advance the hold timer while the main transport is
+            // playing.  When paused (!playing_) the accumulator freezes so
+            // Follow/Wait auto-advances do not fire while the show is paused.
+            if (playing_)
+                rs.hold_start += static_cast<double>(last_dt_);
 
             // Auto-advance when cue trigger type is Follow and hold has elapsed.
             // Respect timing.hold (the user-editable hold column); trigger.time_s
@@ -2989,7 +3168,7 @@ void ShowEngine::build_frame()
             }
 
             // ── go_at_bpm: advance cue on each BPM beat ──────────────────────
-            if (pb->config.go_at_bpm && bpm_ > 0.f) {
+            if (pb->config.go_at_bpm && bpm_ > 0.f && rs.active && rs.current_idx >= 0) {
                 rs.beat_phase += last_dt_ * bpm_ / 60.f;
                 if (rs.beat_phase >= 1.f) {
                     rs.beat_phase -= 1.f;
@@ -3000,7 +3179,7 @@ void ShowEngine::build_frame()
                         next_idx = (pb->config.end_behavior == PlaybackConfig::EndBehavior::Loop)
                                    ? 0 : old_idx;
                     }
-                    if (next_idx != old_idx) {
+                    if (next_idx != old_idx && old_idx >= 0 && old_idx < static_cast<int>(pb->cuelist.size())) {
                         float old_fo = pb->cuelist[static_cast<size_t>(old_idx)].timing.fade_out;
                         rs.prev_idx    = old_idx;
                         rs.current_idx = next_idx;
@@ -3038,10 +3217,18 @@ void ShowEngine::build_frame()
                                                ? fx_it->second : fce.fx_layer;
                     apply_frame_fx(stream_pts, stream_fx, fx_t);
                     apply_global_geometry(stream_pts, fce.global_layer);
-                    apply_global_layer(stream_pts, fce.global_layer, fx_t, pb_intensity, gfx_smooth_);
-                    if (!fce.mirrored_ids.empty() &&
-                        std::find(fce.mirrored_ids.begin(), fce.mirrored_ids.end(), sid) != fce.mirrored_ids.end())
-                        for (auto& pt : stream_pts) pt.x = -pt.x;
+                    apply_global_layer(stream_pts, fce.global_layer, fx_t, pb_intensity, rs.gfx_smooth);
+                    // Apply per-cue mirroring only when live group mirroring is NOT
+                    // already active for this stream.  If both applied simultaneously
+                    // they double-invert (net no flip), which is the mirror-playback bug.
+                    {
+                        bool cue_mir  = !fce.mirrored_ids.empty() &&
+                            std::find(fce.mirrored_ids.begin(), fce.mirrored_ids.end(), sid) != fce.mirrored_ids.end();
+                        bool live_mir = !mirrored_stream_ids_.empty() &&
+                            std::find(mirrored_stream_ids_.begin(), mirrored_stream_ids_.end(), sid) != mirrored_stream_ids_.end();
+                        if (cue_mir && !live_mir)
+                            for (auto& pt : stream_pts) pt.x = -pt.x;
+                    }
                     for (const auto& pt : stream_pts)
                         per_stream_extras[sid].push_back(pt);
                 }
@@ -3051,16 +3238,41 @@ void ShowEngine::build_frame()
                 PointBuffer pb_pts = render_keyframe_layer(fce.keyframe_layer, 256);
                 apply_frame_fx(pb_pts, fce.fx_layer, fx_t);
                 apply_global_geometry(pb_pts, fce.global_layer);
-                apply_global_layer(pb_pts, fce.global_layer, fx_t, pb_intensity, gfx_smooth_);
-                if (assigned.empty()) {
+                apply_global_layer(pb_pts, fce.global_layer, fx_t, pb_intensity, rs.gfx_smooth);
+                if (assigned.empty() && fce.mirrored_ids.empty()) {
+                    // No per-stream routing needed: push to global composite buffer.
                     for (auto& pt : pb_pts)
                         points.push_back(pt);
+                } else if (assigned.empty()) {
+                    // No explicit assignment but per-cue mirroring is active: fan out
+                    // per-stream so each mirrored stream receives a flipped copy.
+                    // Guard: skip pre-flip for streams where live group mirror is active
+                    // (the fanout will flip via mirrored_stream_ids_; pre-flipping here
+                    // would double-invert to no flip — the mirror-playback bug).
+                    for (int sid : effective_ids) {
+                        bool is_mir  = std::find(fce.mirrored_ids.begin(),
+                                                  fce.mirrored_ids.end(), sid)
+                                       != fce.mirrored_ids.end();
+                        bool live_mir = !mirrored_stream_ids_.empty() &&
+                            std::find(mirrored_stream_ids_.begin(), mirrored_stream_ids_.end(), sid) != mirrored_stream_ids_.end();
+                        if (!is_mir || live_mir) {
+                            for (const auto& pt : pb_pts)
+                                per_stream_extras[sid].push_back(pt);
+                        } else {
+                            for (auto pt : pb_pts) {
+                                pt.x = static_cast<int16_t>(-pt.x);
+                                per_stream_extras[sid].push_back(pt);
+                            }
+                        }
+                    }
                 } else {
                     for (int sid : assigned) {
-                        bool is_mir = !fce.mirrored_ids.empty() &&
-                                      std::find(fce.mirrored_ids.begin(), fce.mirrored_ids.end(), sid) != fce.mirrored_ids.end();
+                        bool is_mir  = !fce.mirrored_ids.empty() &&
+                                       std::find(fce.mirrored_ids.begin(), fce.mirrored_ids.end(), sid) != fce.mirrored_ids.end();
+                        bool live_mir = !mirrored_stream_ids_.empty() &&
+                            std::find(mirrored_stream_ids_.begin(), mirrored_stream_ids_.end(), sid) != mirrored_stream_ids_.end();
                         for (auto pt : pb_pts) {   // copy by value
-                            if (is_mir) pt.x = static_cast<int16_t>(-pt.x);
+                            if (is_mir && !live_mir) pt.x = static_cast<int16_t>(-pt.x);
                             per_stream_extras[sid].push_back(pt);
                         }
                     }
@@ -3144,7 +3356,7 @@ void ShowEngine::build_frame()
                           ndi_pixel_buf_[static_cast<size_t>(i) * 4u + 2]);
             }
             // Timecode: wall-clock 100ns units (1 engine tick = 1ms = 10000 × 100ns)
-            int64_t tc = static_cast<int64_t>(frame_count_) * 10000LL;
+            int64_t tc = static_cast<int64_t>(frame_count_ & 0x7FFFFFFFFFFFFFFFULL) * 10000LL;
             ndi_sender_.send_bgra(ndi_pixel_buf_.data(), ndi_width_, ndi_height_, tc);
         }
         }  // end legacy NDI if (!patch_has_ndi)
@@ -3387,9 +3599,12 @@ void ShowEngine::build_frame()
                 }
                 // Use per-stream transform and safety from OutputStreamDef
                 apply_per_stream_transform(out, def.transform);
-                apply_per_stream_safety(out, def.safety);
 
-                // Downsample for 3D/UI preview (per-stream).
+                // Downsample for 3D/UI preview BEFORE safety transforms so the
+                // 3D preview always shows what the laser is drawing (unmasked).
+                // Safety zones blank the hardware output but should not blank the
+                // preview — the operator needs to see the content even when safety
+                // zones are active.
                 {
                     PointBuffer& pv = per_stream_preview_pts_[def.id];
                     pv.clear();
@@ -3397,6 +3612,8 @@ void ShowEngine::build_frame()
                     for (int pi = 0; pi < static_cast<int>(out.size()); pi += step)
                         pv.push_back(out[static_cast<size_t>(pi)]);
                 }
+
+                apply_per_stream_safety(out, def.safety);
 
                 RenderFrame frame;
                 frame.points     = std::move(out);
@@ -3448,7 +3665,7 @@ void ShowEngine::build_frame()
                     for (int64_t pi = 0; pi < px; ++pi)
                         std::swap(rt->ndi_pixel_buf[static_cast<size_t>(pi)*4],
                                   rt->ndi_pixel_buf[static_cast<size_t>(pi)*4+2]);
-                    int64_t tc = static_cast<int64_t>(frame_count_) * 10000LL;
+                    int64_t tc = static_cast<int64_t>(frame_count_ & 0x7FFFFFFFFFFFFFFFULL) * 10000LL;
                     rt->ndi_sender->send_bgra(rt->ndi_pixel_buf.data(),
                                               cfg.ndi_width, cfg.ndi_height, tc);
                 }
@@ -3650,7 +3867,11 @@ RenderBus* ShowEngine::extra_laser_bus(int stream_index)
 // ─────────────────────────────────────────────────────────────────────────────
 std::vector<OutputStreamConfig> ShowEngine::output_stream_configs() const
 {
-    std::lock_guard<std::mutex> lk(snap_mtx_);
+    // C-3: output_streams_ is written in process_commands() which holds
+    // project_access_mtx_.  snap_mtx_ is only held during snapshot flips and
+    // is NOT acquired when writing output_streams_, so using snap_mtx_ here
+    // left a data race.  Use project_access_mtx_ to match the write side.
+    std::lock_guard<std::mutex> lk(project_access_mtx_);
     std::vector<OutputStreamConfig> out;
     out.reserve(output_streams_.size());
     for (const auto& s : output_streams_)
@@ -3841,7 +4062,10 @@ void ShowEngine::update_snapshot(double fps)
     s.chaser_step_count = 0;
     if (project_ && active_cue_ >= 0 && active_cue_ < static_cast<int>(project_->cues.size())) {
         const std::string& target_id = project_->cues[static_cast<size_t>(active_cue_)].id;
-        for (const auto& fce : project_->full_cue_list) {
+        // Use cue_list_ (engine-thread-owned) instead of project_->full_cue_list to
+        // avoid racing with the UI save path that copies project_->full_cue_list.
+        for (int ei = 0; ei < cue_list_.entry_count(); ++ei) {
+            const auto& fce = cue_list_.entry_at(ei);
             if (fce.cue_id == target_id && fce.is_chaser) {
                 s.chaser_step_count = static_cast<int>(fce.chaser_steps.size());
                 break;
@@ -3941,6 +4165,21 @@ std::vector<TimelineDef> ShowEngine::read_timelines() const {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  snapshot_project_for_save — thread-safe project copy for UI save / auto-save
+//
+//  Holds project_access_mtx_ while copying *project_ so that process_commands()
+//  (the only writer of project_->full_cue_list and project_->playbacks[n].cuelist)
+//  cannot run concurrently.  After the copy the UI can freely call copy.save()
+//  without any shared state remaining in play.
+// ─────────────────────────────────────────────────────────────────────────────
+Project ShowEngine::snapshot_project_for_save() const
+{
+    std::lock_guard<std::mutex> lk(project_access_mtx_);
+    if (!project_) return {};
+    return *project_;          // deep copy — safe while command handlers are blocked
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  tick — (used internally; public interface is engine_loop)
 // ─────────────────────────────────────────────────────────────────────────────
 void ShowEngine::tick(double dt)
@@ -3996,13 +4235,9 @@ void EngineWatchdog::watch_loop()
             log::warn("EngineWatchdog: engine thread stalled (heartbeat=%llu) "
                       "— attempting restart",
                       static_cast<unsigned long long>(current));
-            // Attempt restart: stop then start engine thread.
-            // Note: we cannot join from this thread if the engine thread is
-            // truly frozen. We log and signal; a higher-level component should
-            // handle recovery.
-            engine_.stop();
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            engine_.start();
+            // Attempt restart with a time-limited join to avoid blocking
+            // forever if the engine thread is truly frozen.
+            engine_.restart();
         }
         last_heartbeat = current;
     }

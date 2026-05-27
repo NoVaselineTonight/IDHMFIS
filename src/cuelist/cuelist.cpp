@@ -15,12 +15,35 @@ namespace idhmfis {
 
 void CueList::add_entry(FullCueEntry entry)
 {
+    // BUG #28 fix: reject entries whose CueNumber already exists in the list.
+    // Duplicate numbers cause find_by_number() to return the wrong index, silently
+    // corrupting the active cue pointer after any sort or index-based lookup.
+    for (const auto& e : entries_) {
+        if (e.number == entry.number) {
+            // Duplicate detected — reject silently. Caller should assign a
+            // unique CueNumber before calling add_entry().
+            return;
+        }
+    }
+
+    // H-8: stable_sort can reorder entries, invalidating current_idx_.
+    // Save the active entry's CueNumber before the sort so we can re-find it.
+    CueNumber saved_number{};
+    const bool had_current = (current_idx_ >= 0 &&
+                              current_idx_ < static_cast<int>(entries_.size()));
+    if (had_current)
+        saved_number = entries_[static_cast<std::size_t>(current_idx_)].number;
+
     entries_.push_back(std::move(entry));
     // Keep entries sorted by CueNumber so binary searches stay valid.
     std::stable_sort(entries_.begin(), entries_.end(),
         [](const FullCueEntry& a, const FullCueEntry& b) {
             return a.number < b.number;
         });
+
+    // Restore current_idx_ to the (possibly moved) active entry.
+    if (had_current)
+        current_idx_ = find_by_number(saved_number);
 }
 
 void CueList::remove_entry(int index)
@@ -70,22 +93,54 @@ void CueList::update_entry(int index, FullCueEntry entry)
 {
     if (index < 0 || index >= static_cast<int>(entries_.size()))
         return;
+
+    // BUG #28 fix: reject if the new number collides with another existing entry.
+    // (It is allowed for the entry to keep its own current number.)
+    for (int i = 0; i < static_cast<int>(entries_.size()); ++i) {
+        if (i != index && entries_[static_cast<std::size_t>(i)].number == entry.number) {
+            // Duplicate number on a different entry — reject update.
+            return;
+        }
+    }
+
+    // H-9: stable_sort can reorder entries, invalidating current_idx_.
+    // If we are updating the active entry, track its *new* number (it may change).
+    const bool had_current = (current_idx_ >= 0 &&
+                              current_idx_ < static_cast<int>(entries_.size()));
+    CueNumber saved_number{};
+    if (had_current) {
+        saved_number = (current_idx_ == index)
+                     ? entry.number  // the updated entry may carry a new number
+                     : entries_[static_cast<std::size_t>(current_idx_)].number;
+    }
+
     entries_[index] = std::move(entry);
     // Re-sort because the CueNumber may have changed.
     std::stable_sort(entries_.begin(), entries_.end(),
         [](const FullCueEntry& a, const FullCueEntry& b) {
             return a.number < b.number;
         });
+
+    // Restore current_idx_ to the (possibly moved) active entry.
+    if (had_current)
+        current_idx_ = find_by_number(saved_number);
 }
 
 const FullCueEntry& CueList::entry_at(int index) const
 {
-    return entries_.at(static_cast<std::size_t>(index));
+    // BUG #29 fix: negative index would wrap to a huge size_t, bypassing at()'s
+    // bounds check and causing undefined behaviour. Catch it with a signed check first.
+    if (index < 0 || static_cast<std::size_t>(index) >= entries_.size())
+        throw std::out_of_range("CueList::entry_at: index out of range");
+    return entries_[static_cast<std::size_t>(index)];
 }
 
 FullCueEntry& CueList::entry_at(int index)
 {
-    return entries_.at(static_cast<std::size_t>(index));
+    // BUG #29 fix: same guard as const overload.
+    if (index < 0 || static_cast<std::size_t>(index) >= entries_.size())
+        throw std::out_of_range("CueList::entry_at: index out of range");
+    return entries_[static_cast<std::size_t>(index)];
 }
 
 const FullCueEntry* CueList::entry_at_safe(int index) const
@@ -259,6 +314,11 @@ std::vector<PlaybackEventData> CueList::tick(double dt)
     case PlaybackState::Holding: {
         hold_elapsed_ += dt;
 
+        // H-10/H-11: guard against current_idx_ going out of range (e.g. after
+        // remove_entry() while in Holding state).
+        if (current_idx_ < 0 || current_idx_ >= static_cast<int>(entries_.size()))
+            break;
+
         const FullCueEntry& cur = entries_[static_cast<std::size_t>(current_idx_)];
         const float hold_dur    = cur.timing.hold;
 
@@ -313,8 +373,12 @@ std::vector<PlaybackEventData> CueList::tick(double dt)
         bool link_fired = false;
 
         // Check Follow trigger.
-        if (cur.trigger.type == TriggerType::Follow) {
+        // M-6: guard with trigger_fired_ latch — without it the trigger re-fires
+        // every tick after time_s, calling handle_link() thousands of times per second
+        // and producing a storm of CueActivated events.
+        if (!trigger_fired_ && cur.trigger.type == TriggerType::Follow) {
             if (cue_time_ >= static_cast<double>(cur.trigger.time_s)) {
+                trigger_fired_ = true;
                 PlaybackEventData ev;
                 ev.event       = PlaybackEvent::TriggerFired;
                 ev.entry_index = current_idx_;
@@ -330,13 +394,14 @@ std::vector<PlaybackEventData> CueList::tick(double dt)
         // For hold=0: fires trigger.time_s seconds from cue start.
         // For hold>0: fires trigger.time_s seconds after hold ends (cue_time_ resumes
         //             from delay_in+fade_in after hold, so check from that threshold).
-        if (!link_fired && cur.trigger.type == TriggerType::Wait) {
+        if (!trigger_fired_ && !link_fired && cur.trigger.type == TriggerType::Wait) {
             const double trigger_at = (cur.timing.hold > 0.f)
                 ? (static_cast<double>(cur.timing.delay_in)
                    + static_cast<double>(cur.timing.fade_in)
                    + static_cast<double>(cur.trigger.time_s))
                 : static_cast<double>(cur.trigger.time_s);
             if (!in_hold_ && cue_time_ >= trigger_at) {
+                trigger_fired_ = true;
                 PlaybackEventData ev;
                 ev.event       = PlaybackEvent::TriggerFired;
                 ev.entry_index = current_idx_;
@@ -409,12 +474,13 @@ void CueList::activate_entry(int index, bool rebuild_tracking,
     if (index < 0 || index >= static_cast<int>(entries_.size()))
         return;
 
-    current_idx_  = index;
-    cue_time_     = 0.0;
-    fade_level_   = 0.0;
-    in_hold_      = false;
-    hold_elapsed_ = 0.0;
-    state_        = PlaybackState::Playing;
+    current_idx_   = index;
+    cue_time_      = 0.0;
+    fade_level_    = 0.0;
+    in_hold_       = false;
+    hold_elapsed_  = 0.0;
+    trigger_fired_ = false;  // M-6: reset latch so Follow/Wait fires exactly once
+    state_         = PlaybackState::Playing;
 
     if (rebuild_tracking)
         rebuild_tracking_from(index);
@@ -528,11 +594,17 @@ double CueList::apply_curve(double alpha, PathInterp interp) const
 
 double CueList::compute_fade_level(double t, const CueTimingBlock& timing) const
 {
-    const double delay_in  = static_cast<double>(timing.delay_in);
-    const double fade_in   = static_cast<double>(timing.fade_in);
-    const double hold_dur  = static_cast<double>(timing.hold);
-    const double delay_out = static_cast<double>(timing.delay_out);
-    const double fade_out  = static_cast<double>(timing.fade_out);
+    // BUG #55 fix: NaN/Inf in timing fields propagates through the phase boundaries
+    // and ultimately to the int16_t cast in the engine, producing undefined behaviour.
+    // Clamp each field to a finite, non-negative value before use.
+    auto safe_timing = [](float v) -> double {
+        return std::isfinite(v) && v >= 0.f ? static_cast<double>(v) : 0.0;
+    };
+    const double delay_in  = safe_timing(timing.delay_in);
+    const double fade_in   = safe_timing(timing.fade_in);
+    const double hold_dur  = safe_timing(timing.hold);
+    const double delay_out = safe_timing(timing.delay_out);
+    const double fade_out  = safe_timing(timing.fade_out);
 
     // ── Phase boundaries ─────────────────────────────────────────────────────
     const double p1 = delay_in;               // end of delay_in / start of fade_in
@@ -568,7 +640,10 @@ double CueList::compute_fade_level(double t, const CueTimingBlock& timing) const
     if (fade_out <= 0.0)
         return 0.0;
     const double alpha = 1.0 - ((t - p4) / fade_out);
-    return apply_curve(alpha, timing.path);
+    // BUG #55 fix: clamp the final level to [0,1] so any residual floating-point
+    // imprecision never produces a value outside valid range before int16_t casts.
+    const double level = apply_curve(alpha, timing.path);
+    return (level < 0.0) ? 0.0 : ((level > 1.0) ? 1.0 : level);
 }
 
 void CueList::handle_link(std::vector<PlaybackEventData>& out_events)
@@ -595,13 +670,15 @@ void CueList::handle_link(std::vector<PlaybackEventData>& out_events)
 
     case LinkMode::Loop: {
         if (!entries_.empty()) {
+            // BUG #76: capture time_s BEFORE activate_entry resets cue_time_ to 0.
+            float reported_time_s = static_cast<float>(cue_time_);
             activate_entry(0, true, out_events);
 
             PlaybackEventData ev;
             ev.event       = PlaybackEvent::LoopedBack;
             ev.entry_index = 0;
             ev.cue_number  = entries_.front().number;
-            ev.time_s      = cue_time_;
+            ev.time_s      = reported_time_s;
             out_events.push_back(ev);
         }
         break;
@@ -641,13 +718,15 @@ void CueList::handle_link(std::vector<PlaybackEventData>& out_events)
             ev.time_s      = cue_time_;
             out_events.push_back(ev);
         } else {
+            // BUG #76: capture time_s BEFORE activate_entry resets cue_time_ to 0.
+            float reported_time_s = static_cast<float>(cue_time_);
             activate_entry(target_idx, true, out_events);
 
             PlaybackEventData ev;
             ev.event       = PlaybackEvent::JumpedTo;
             ev.entry_index = target_idx;
             ev.cue_number  = entries_[static_cast<std::size_t>(target_idx)].number;
-            ev.time_s      = cue_time_;
+            ev.time_s      = reported_time_s;
             out_events.push_back(ev);
         }
         break;

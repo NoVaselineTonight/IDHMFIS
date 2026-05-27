@@ -355,7 +355,15 @@ static void draw_add_event_popup(const std::string& timeline_id,
 // ─────────────────────────────────────────────────────────────────────────────
 void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs)
 {
-    if (!ctx.timeline_view_open) return;
+    // Re-dock the window when it is reopened after being closed.
+    // When the editor's dock node becomes empty ImGui prunes it within ~20
+    // frames, so the window would re-appear floating (behind the host window)
+    // on the next Begin().  Detect the closed→open transition and
+    // force-assign the saved dock node ID so it lands in the right place.
+    // Must be declared before the early-return guard so it is always updated.
+    static bool s_was_open = true; // mirrors the default of timeline_view_open
+
+    if (!ctx.timeline_view_open) { s_was_open = false; return; }
 
     // ── Keyboard shortcuts — active when this window is focused ───────────────
     auto tl_key_action = [&](int key_id) -> bool {
@@ -372,14 +380,20 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
 
     std::string win_title = "Timeline Editor##tlv";
 
+    const bool just_opened = !s_was_open;
+    if (just_opened && ctx.tl_editor_dock_node_id != 0)
+        ImGui::SetNextWindowDockID(ctx.tl_editor_dock_node_id, ImGuiCond_Always);
+
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar;
     bool win_open = ctx.timeline_view_open;
     if (!ImGui::Begin(win_title.c_str(), &win_open, flags)) {
         ctx.timeline_view_open = win_open;
+        s_was_open = win_open; // false if closed via X, true if just a background tab
         ImGui::End();
         return;
     }
     ctx.timeline_view_open = win_open;
+    s_was_open = win_open;
 
     // Process keyboard shortcuts when window is focused
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && tl_info) {
@@ -614,7 +628,7 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
                         ImGui::ColorConvertFloat4ToU32(theme::accent()), 2.f);
         }
 
-        float dummy_w = ruler_orig.x + kLeftPad + ruler_w - wpos.x;
+        float dummy_w = std::max(ruler_orig.x + kLeftPad + ruler_w - wpos.x, 1.f);
         ImGui::InvisibleButton("##ruler_seek", { dummy_w, ruler_h });
         if (ImGui::IsItemActive() &&
             (ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
@@ -633,7 +647,7 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
         if (ImGui::IsItemHovered() && std::fabs(ImGui::GetIO().MouseWheel) > 0.f) {
             const ImGuiIO& rlio = ImGui::GetIO();
             if (rlio.KeyCtrl) {
-                float zoom_before = ctx.timeline_view_zoom;
+                float zoom_before = std::max(ctx.timeline_view_zoom, 0.01f); // guard /0
                 float factor = (rlio.MouseWheel > 0.f) ? 1.15f : (1.f / 1.15f);
                 float zoom_after = std::clamp(zoom_before * factor, 1.f, 400.f);
                 float content_x = ImGui::GetMousePos().x - (ruler_orig.x + kLeftPad);
@@ -642,7 +656,8 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
                                       + static_cast<double>(content_x) / static_cast<double>(zoom_before);
                     ctx.timeline_view_scroll = mouse_frame
                                             - static_cast<double>(content_x) / static_cast<double>(zoom_after);
-                    if (ctx.timeline_view_scroll < 0.0) ctx.timeline_view_scroll = 0.0;
+                    // Sanitize: clamp to valid range, guard against NaN/Inf
+                    if (!(ctx.timeline_view_scroll > 0.0)) ctx.timeline_view_scroll = 0.0;
                 }
                 ctx.timeline_view_zoom = zoom_after;
             } else {
@@ -731,7 +746,11 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
 
     ImGui::BeginChild("##tl_lanes", { 0.f, std::max(avail_h - 60.f, 1.f) },
                       ImGuiChildFlags_Borders,
-                      ImGuiWindowFlags_None);
+                      // NoScrollWithMouse + NoScrollbar: disable ImGui's own wheel-scroll
+                      // so our custom zoom/scroll handler is the only thing running.
+                      // Without this, ImGui internally scrolls the layout cursor,
+                      // corrupting GetCursorScreenPos() for lane_orig calculations.
+                      ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoScrollbar);
     {
         // Horizontal scroll via horizontal mouse wheel
         if (ImGui::IsWindowHovered() && std::fabs(ImGui::GetIO().MouseWheelH) > 0.f) {
@@ -742,7 +761,7 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
             const ImGuiIO& tlio = ImGui::GetIO();
             if (tlio.KeyCtrl) {
                 // Ctrl+Scroll: zoom in/out, anchored to mouse position
-                float zoom_before = ctx.timeline_view_zoom;
+                float zoom_before = std::max(ctx.timeline_view_zoom, 0.01f); // guard /0
                 float factor = (tlio.MouseWheel > 0.f) ? 1.15f : (1.f / 1.15f);
                 float zoom_after = std::clamp(zoom_before * factor, 1.f, 400.f);
                 // Anchor scroll so the frame under the mouse stays fixed
@@ -753,7 +772,8 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
                                       + static_cast<double>(content_x) / static_cast<double>(zoom_before);
                     ctx.timeline_view_scroll = mouse_frame
                                             - static_cast<double>(content_x) / static_cast<double>(zoom_after);
-                    if (ctx.timeline_view_scroll < 0.0) ctx.timeline_view_scroll = 0.0;
+                    // Sanitize: !(x > 0.0) catches both x <= 0 and NaN
+                    if (!(ctx.timeline_view_scroll > 0.0)) ctx.timeline_view_scroll = 0.0;
                 }
                 ctx.timeline_view_zoom = zoom_after;
             } else if (tlio.KeyShift) {

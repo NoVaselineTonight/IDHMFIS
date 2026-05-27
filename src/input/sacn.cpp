@@ -52,6 +52,7 @@
 #include <chrono>
 #include <algorithm>
 #include <fstream>
+#include <random>
 
 #include "sacn.h"
 #include "../core/logger.h"
@@ -113,21 +114,15 @@ inline void pdu_len(uint8_t* p, uint16_t len) {
 // ─────────────────────────────────────────────────────────────────────────────
 SACNCid SACNCid::generate() {
     SACNCid cid;
-    // Use steady_clock + system_clock as entropy
-    uint64_t t1 = static_cast<uint64_t>(
-        std::chrono::steady_clock::now().time_since_epoch().count());
-    uint64_t t2 = static_cast<uint64_t>(
-        std::chrono::system_clock::now().time_since_epoch().count());
-
-    // Mix into 16 bytes using simple xorshift
-    uint64_t a = t1 ^ 0x123456789ABCDEF0ULL;
-    uint64_t b = t2 ^ 0xFEDCBA9876543210ULL;
-    for (int i = 0; i < 3; ++i) {
-        a ^= a << 13; a ^= a >> 7; a ^= a << 17;
-        b ^= b << 17; b ^= b >> 5; b ^= b << 12;
-    }
-    std::memcpy(cid.bytes.data(),     &a, 8);
-    std::memcpy(cid.bytes.data() + 8, &b, 8);
+    // L-14: the original xorshift on clock values has very low entropy when two
+    // instances start at nearly the same time (e.g. restart after a crash), and
+    // can collide on some systems where steady_clock and system_clock share their
+    // reference.  Use std::random_device which is seeded from the OS CSPRNG
+    // (BCrypt on Windows, /dev/urandom on Linux) for proper UUID v4 generation.
+    std::random_device rd;
+    std::uniform_int_distribution<unsigned int> dist(0, 255);
+    for (auto& b : cid.bytes)
+        b = static_cast<uint8_t>(dist(rd));
 
     // Set UUID version 4 and variant bits
     cid.bytes[6] = static_cast<uint8_t>((cid.bytes[6] & 0x0F) | 0x40); // version 4
@@ -169,6 +164,8 @@ bool SACNCid::save(const std::string& path) const {
 // ─────────────────────────────────────────────────────────────────────────────
 SACNSender::SACNSender(SACNCid cid) : cid_(cid) {
     ensure_wsa();
+    // BUG #71: seq_ is now kMaxSACNUniverses (63999) bytes; zero-initialise
+    // the full array so all universe sequence counters start at 0.
     std::memset(seq_, 0, sizeof(seq_));
 }
 

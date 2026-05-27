@@ -33,7 +33,7 @@ public:
         float anim   = static_cast<float>(t) * p.speed;
         float scale  = p.scale;
 
-        int n = p.point_count / 2; // half for each edge
+        int n = std::max(2, p.point_count / 2); // half for each edge
 
         Color4 ca = p.color_a;
         Color4 cb = p.color_b;
@@ -44,7 +44,7 @@ public:
 
         for (int i = 0; i < n; ++i)
         {
-            float u  = static_cast<float>(i) / (n - 1); // 0..1 along ribbon
+            float u  = (n > 1) ? static_cast<float>(i) / (n - 1) : 0.f; // 0..1 along ribbon
             float x  = (u * 2.f - 1.f) * length * scale;
 
             // Two sine waves at different frequencies for complex undulation
@@ -69,6 +69,8 @@ public:
             spine[i] = { x, y, -ty, tx };
         }
 
+        if (spine.empty()) return pts;
+
         // Top edge (forward)
         pts.push_back(LaserPoint::from_norm(
             spine[0].x + spine[0].nx * width,
@@ -77,7 +79,7 @@ public:
 
         for (int i = 0; i < n; ++i)
         {
-            float frac = static_cast<float>(i) / (n - 1);
+            float frac = (n > 1) ? static_cast<float>(i) / (n - 1) : 0.f;
             float ex   = spine[i].x + spine[i].nx * width;
             float ey   = spine[i].y + spine[i].ny * width;
             Color4 col = ca.lerp(cb, frac);
@@ -93,7 +95,7 @@ public:
 
         for (int i = n - 1; i >= 0; --i)
         {
-            float frac = static_cast<float>(i) / (n - 1);
+            float frac = (n > 1) ? static_cast<float>(i) / (n - 1) : 0.f;
             float ex   = spine[i].x - spine[i].nx * width;
             float ey   = spine[i].y - spine[i].ny * width;
             Color4 col = cb.lerp(ca, frac);

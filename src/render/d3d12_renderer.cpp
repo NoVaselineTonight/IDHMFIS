@@ -438,6 +438,17 @@ bool D3D12Renderer::create_descriptor_heaps() {
     srv_desc.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     CHK(device_->CreateDescriptorHeap(&srv_desc, IID_PPV_ARGS(&srv_heap_)));
 
+    // M-16: Non-shader-visible UAV heap for ClearUnorderedAccessViewFloat.
+    // D3D12 requires a CPU descriptor from a NON-shader-visible heap as the
+    // second argument. We allocate 1 slot here; the HDR UAV descriptor is
+    // copied into it after hdr_rt_ is created (in create_hdr_render_target).
+    D3D12_DESCRIPTOR_HEAP_DESC uav_clear_desc{};
+    uav_clear_desc.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    uav_clear_desc.NumDescriptors = 1;
+    uav_clear_desc.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_NONE; // NOT shader-visible
+    CHK(device_->CreateDescriptorHeap(&uav_clear_desc, IID_PPV_ARGS(&uav_clear_heap_)));
+    hdr_uav_clear_cpu_ = uav_clear_heap_->GetCPUDescriptorHandleForHeapStart();
+
     // Obtain back buffer RTVs
     if (swap_chain_) {
         for (int i = 0; i < kBackBufferCount; ++i) {
@@ -480,6 +491,13 @@ bool D3D12Renderer::create_hdr_render_target() {
     device_->CreateUnorderedAccessView(hdr_rt_.Get(), nullptr, &uav_desc,
                                         cbv_srv_uav_cpu(kSrvSlotHdrUav));
     hdr_uav_gpu_ = cbv_srv_uav_gpu(kSrvSlotHdrUav);
+
+    // M-16: also create a copy of the HDR UAV descriptor in the non-shader-visible
+    // uav_clear_heap_ so ClearUnorderedAccessViewFloat gets a valid non-visible handle.
+    if (uav_clear_heap_) {
+        device_->CreateUnorderedAccessView(hdr_rt_.Get(), nullptr, &uav_desc,
+                                            hdr_uav_clear_cpu_);
+    }
 
     // SRV for post-process input
     D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
@@ -796,8 +814,20 @@ void D3D12Renderer::render_frame(const PointBuffer& pts) {
     int fi = static_cast<int>(frame_index_ % 2);
 
     // --- Re-open command list ---
-    cmd_alloc_[fi]->Reset();
-    cmd_list_->Reset(cmd_alloc_[fi].Get(), nullptr);
+    // C-5: check Reset() return values — failures indicate device lost, and
+    // proceeding with a closed/broken command list causes GPU crashes.
+    {
+        HRESULT hr_reset = cmd_alloc_[fi]->Reset();
+        if (FAILED(hr_reset)) {
+            log_hr("cmd_alloc Reset", hr_reset);
+            return;
+        }
+        hr_reset = cmd_list_->Reset(cmd_alloc_[fi].Get(), nullptr);
+        if (FAILED(hr_reset)) {
+            log_hr("cmd_list Reset", hr_reset);
+            return;
+        }
+    }
 
     // --- Upload laser points ---
     std::vector<GpuLaserPoint> gpu_pts;
@@ -818,36 +848,43 @@ void D3D12Renderer::render_frame(const PointBuffer& pts) {
         std::min(gpu_pts.size(), static_cast<size_t>(point_buf_capacity_)));
 
     if (point_count > 0) {
-        // Copy to upload buffer
+        // Copy to upload buffer.
+        // C-4: Map() can fail on device-lost; check the return value so we never
+        // dereference a null pointer when the GPU is removed.
         void* mapped = nullptr;
         D3D12_RANGE read_range{ 0, 0 };
-        point_buf_upload_->Map(0, &read_range, &mapped);
-        memcpy(mapped, gpu_pts.data(), point_count * sizeof(GpuLaserPoint));
-        point_buf_upload_->Unmap(0, nullptr);
+        HRESULT hr_map = point_buf_upload_->Map(0, &read_range, &mapped);
+        if (SUCCEEDED(hr_map) && mapped) {
+            memcpy(mapped, gpu_pts.data(), point_count * sizeof(GpuLaserPoint));
+            point_buf_upload_->Unmap(0, nullptr);
 
-        // Upload → GPU default
-        transition(cmd_list_.Get(), point_buf_gpu_.Get(),
-                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                   D3D12_RESOURCE_STATE_COPY_DEST);
-        cmd_list_->CopyBufferRegion(point_buf_gpu_.Get(), 0,
-                                     point_buf_upload_.Get(), 0,
-                                     point_count * sizeof(GpuLaserPoint));
-        transition(cmd_list_.Get(), point_buf_gpu_.Get(),
-                   D3D12_RESOURCE_STATE_COPY_DEST,
-                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            // Upload → GPU default
+            transition(cmd_list_.Get(), point_buf_gpu_.Get(),
+                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                       D3D12_RESOURCE_STATE_COPY_DEST);
+            cmd_list_->CopyBufferRegion(point_buf_gpu_.Get(), 0,
+                                         point_buf_upload_.Get(), 0,
+                                         point_count * sizeof(GpuLaserPoint));
+            transition(cmd_list_.Get(), point_buf_gpu_.Get(),
+                       D3D12_RESOURCE_STATE_COPY_DEST,
+                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        } else {
+            // Map failed (device lost) — skip upload; GPU uses last frame's data.
+            log_hr("point_buf_upload Map", hr_map);
+            point_count = 0;
+        }
     }
 
     // --- Clear HDR RT ---
     const float zero[4] = { 0, 0, 0, 0 };
-    // UAV clear requires a CPU-visible UAV — use a null-descriptor workaround
-    // by clearing via ClearUnorderedAccessViewFloat
-    // (We use the HDR UAV descriptor in the non-shader-visible copy)
-    // For simplicity, clear the HDR buffer each frame via a compute dispatch
-    // with 0 write or just overwrite via additive accumulation starting from 0.
-    // We clear by copying a zero texture using ClearUnorderedAccessViewFloat.
+    // M-16: ClearUnorderedAccessViewFloat requires:
+    //   arg1 = GPU descriptor handle from a SHADER-VISIBLE heap  (hdr_uav_gpu_) ✓
+    //   arg2 = CPU descriptor handle from a NON-SHADER-VISIBLE heap (hdr_uav_clear_cpu_) ✓
+    // Previously arg2 was cbv_srv_uav_cpu(kSrvSlotHdrUav) which is from the
+    // shader-visible srv_heap_, causing a D3D12 validation error.
     cmd_list_->ClearUnorderedAccessViewFloat(
         hdr_uav_gpu_,
-        cbv_srv_uav_cpu(kSrvSlotHdrUav),
+        hdr_uav_clear_cpu_,
         hdr_rt_.Get(), zero, 0, nullptr);
 
     // --- Beam raster pass ---

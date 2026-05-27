@@ -4,6 +4,7 @@
 
 #include "timeline_types.h"
 #include "../input/timecode.h"
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -55,11 +56,19 @@ public:
     void wait_for_go_advance(const std::string& id);
     void set_wait_for_go    (const std::string& id);
 
+    // Clear the record-armed flag on a timeline (called when timeline is stopped).
+    void clear_record_armed (const std::string& id);
+
     // ── TC config (jump-detect thresholds per slot) ───────────────────────────
     void set_tc_config(const ProjectTimecodeConfig& cfg) { tc_config_ = cfg; }
 
     // ── Accessors ─────────────────────────────────────────────────────────────
-    const std::vector<TimelineDef>& defs() const { return defs_; }
+    // H-6: returns a snapshot copy — safe to call from the UI thread while the
+    // engine thread modifies defs_ concurrently.
+    std::vector<TimelineDef> defs() const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return defs_;
+    }
 
     TimecodeSourceStatus source_status(const TimecodeState& tc,
                                        const std::string&   slot) const;
@@ -85,6 +94,10 @@ private:
         int64_t       next_event_id  = 1;     // monotonic event ID counter
     };
 
+    // H-6: defs_ and runtimes_ are written by the engine thread (tick, CRUD
+    // command handlers) and read by the UI thread (defs(), runtime_snaps(),
+    // source_status()). Protect both vectors with a single mutex.
+    mutable std::mutex       mtx_;
     std::vector<TimelineDef> defs_;
     std::vector<Runtime>     runtimes_;
     ProjectTimecodeConfig    tc_config_;

@@ -34,6 +34,8 @@ const std::vector<FxParam*> BlockStackFanOut::params() const {
 void BlockStackFanOut::process(PointBuffer& buf, float dt, const ExprContext& /*ctx*/) {
     const float speed  = p_speed_.effective();
     anim_phase_ += speed * static_cast<float>(2.0 * M_PI) * dt;
+    // Wrap to preserve float precision over long shows
+    anim_phase_ = std::fmod(anim_phase_, static_cast<float>(2.0 * M_PI));
 
     const float fan_radius = p_fan_radius_.effective();
     const float stack_x    = p_stack_x_.effective();

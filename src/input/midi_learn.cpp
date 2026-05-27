@@ -39,10 +39,10 @@ void MidiLearnMap::clear()
     bindings_.clear();
 }
 
-std::vector<const MidiBinding*> MidiLearnMap::resolve(const MidiLearnMsg& msg) const
+std::vector<MidiBinding> MidiLearnMap::resolve(const MidiLearnMsg& msg) const
 {
     std::lock_guard<std::mutex> lk(mtx_);
-    std::vector<const MidiBinding*> results;
+    std::vector<MidiBinding> results;
     for (const auto& b : bindings_) {
         if (b.type != msg.type) continue;
         // channel 0 = "any channel"
@@ -51,7 +51,7 @@ std::vector<const MidiBinding*> MidiLearnMap::resolve(const MidiLearnMsg& msg) c
         if (b.type != MidiMsgType::PitchBend && b.type != MidiMsgType::Aftertouch) {
             if (b.number != msg.number) continue;
         }
-        results.push_back(&b);
+        results.push_back(b);
     }
     return results;
 }
@@ -104,13 +104,19 @@ std::string MidiLearnMap::to_json() const
     for (size_t i = 0; i < bindings_.size(); ++i) {
         const auto& b = bindings_[i];
         if (i > 0) os << ',';
-        char buf[256];
-        std::snprintf(buf, sizeof(buf),
-            "{\"type\":\"%s\",\"channel\":%d,\"number\":%d"
-            ",\"target\":\"%s\",\"min_val\":%.6f,\"max_val\":%.6f}",
-            type_to_str(b.type), b.channel, b.number,
-            json_escape(b.target).c_str(), b.min_val, b.max_val);
-        os << buf;
+        // BUG #50: use std::string / ostringstream directly so that long
+        // target names (control_name, channel_name) are never silently
+        // truncated by a fixed-size snprintf buffer.
+        char fmin[32], fmax[32];
+        std::snprintf(fmin, sizeof(fmin), "%.6f", b.min_val);
+        std::snprintf(fmax, sizeof(fmax), "%.6f", b.max_val);
+        os << "{\"type\":\"" << type_to_str(b.type) << "\""
+           << ",\"channel\":"   << b.channel
+           << ",\"number\":"    << b.number
+           << ",\"target\":\""  << json_escape(b.target) << "\""
+           << ",\"min_val\":"   << fmin
+           << ",\"max_val\":"   << fmax
+           << "}";
     }
     os << "]}";
     return os.str();

@@ -62,8 +62,20 @@ struct TimecodeState {
     TimecodeSource source = TimecodeSource::Internal;
     bool          valid   = false;  // false = no timecode lock
 
-    // Absolute frame index for chase arithmetic
+    // Absolute frame index for chase arithmetic.
+    // For 29.97 DF the standard drop-frame correction is applied so the count
+    // matches wall-clock time (skips frame numbers 0 and 1 at every minute
+    // boundary except every 10th minute — SMPTE/EBU drop-frame spec).
     int64_t total_frames() const {
+        if (fps == SmpteRate::Fps2997) {
+            int64_t total_minutes = static_cast<int64_t>(hours) * 60 + minutes;
+            int64_t drop_count    = 2 * (total_minutes - total_minutes / 10);
+            return static_cast<int64_t>(hours)   * 3600 * 30
+                 + static_cast<int64_t>(minutes) *   60 * 30
+                 + static_cast<int64_t>(seconds) *        30
+                 + static_cast<int64_t>(frames)
+                 - drop_count;
+        }
         int fps_int = smpte_max_frames(fps);
         return static_cast<int64_t>(hours)   * 3600 * fps_int
              + static_cast<int64_t>(minutes) *   60 * fps_int

@@ -416,7 +416,7 @@ void HeliosDac::send_frame(const HeliosPoint* pts, int count) {
 //  send_points
 // ─────────────────────────────────────────────────────────────────────────────
 int HeliosDac::send_points(const PointBuffer& pts) {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::unique_lock<std::mutex> lk(mutex_);
     if (!open_ || pts.empty()) return 0;
 
     // Convert all points first
@@ -429,9 +429,16 @@ int HeliosDac::send_points(const PointBuffer& pts) {
     int remaining = static_cast<int>(converted.size());
 
     while (remaining > 0) {
-        // Wait for DAC to be ready (up to 16 ms)
-        if (!poll_ready(16)) {
-            log::warn("Helios: DAC not ready after 16ms, dropping %d points", remaining);
+        // BUG #37: Release the mutex around the blocking poll_ready() call so
+        // that close() is not stalled for the full 8 ms per iteration.
+        // Re-check open_ after reacquiring in case close() ran during the wait.
+        lk.unlock();
+        bool ready = poll_ready(8); // blocking call, no lock held
+        lk.lock();
+        if (!open_) break; // close() called while waiting — abort the send
+
+        if (!ready) {
+            log::warn("Helios: DAC not ready after 8ms, dropping %d points", remaining);
             break;
         }
 
@@ -442,7 +449,8 @@ int HeliosDac::send_points(const PointBuffer& pts) {
         remaining -= chunk;
     }
 
-    cached_status_.buffer_free  = (sent == static_cast<int>(pts.size())) ? 0 : remaining;
+    // buffer_free: 0 on full success; remaining unsent count on partial send.
+    cached_status_.buffer_free = remaining;
     return sent;
 }
 

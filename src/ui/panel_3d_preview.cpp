@@ -30,7 +30,7 @@ struct Vec3 {
 };
 
 struct Camera {
-    float azimuth   = 0.4f;
+    float azimuth   = 0.0f;  // 0 = facing straight on; +X (laser 1) appears left-most
     float elevation = 0.28f;
     float distance  = 20.f;
     Vec3  target    = {0.f, 2.5f, 10.f};
@@ -74,10 +74,18 @@ static bool project_point(Vec3 world, const CamAxes& axes, float fov_deg,
     return true;
 }
 
+// Room dimensions — updated each frame from UIState::Preview3dSettings.
+// Stored as module-level statics so all helper functions use the same values
+// without threading them through every call signature.
+static float s_rw   = 6.f;   // half-width  (±s_rw metres)
+static float s_rh   = 5.f;   // full height (floor = 0, ceiling = s_rh)
+static float s_rd   = 20.f;  // depth       (laser at z≈0, back wall at z≈s_rd)
+static float s_ps   = 3.0f;  // projection half-scale (±s_ps in X and Y, square)
+
 static Vec3 clamp_to_room(Vec3 p) {
-    p.x = std::clamp(p.x, -6.f, 6.f);
-    p.y = std::clamp(p.y, 0.f,  5.f);
-    p.z = std::clamp(p.z, 0.f, 20.f);
+    p.x = std::clamp(p.x, -s_rw, s_rw);
+    p.y = std::clamp(p.y,  0.f,  s_rh);
+    p.z = std::clamp(p.z,  0.f,  s_rd);
     return p;
 }
 
@@ -91,14 +99,12 @@ static void draw_world_line(ImDrawList* dl, Vec3 a, Vec3 b,
         dl->AddLine(sa, sb, col, thick);
 }
 
-static constexpr float kRW = 6.f, kRH = 5.f, kRD = 20.f;
-
 static void draw_room(ImDrawList* dl, const CamAxes& axes, float fov_deg, ImVec2 cpos, ImVec2 csz)
 {
     const ImU32 wc = IM_COL32(35, 48, 65, 150);
     Vec3 c[8] = {
-        {-kRW,0.f,0.f},{kRW,0.f,0.f},{kRW,kRH,0.f},{-kRW,kRH,0.f},
-        {-kRW,0.f,kRD},{kRW,0.f,kRD},{kRW,kRH,kRD},{-kRW,kRH,kRD}
+        {-s_rw,0.f,0.f},{s_rw,0.f,0.f},{s_rw,s_rh,0.f},{-s_rw,s_rh,0.f},
+        {-s_rw,0.f,s_rd},{s_rw,0.f,s_rd},{s_rw,s_rh,s_rd},{-s_rw,s_rh,s_rd}
     };
     draw_world_line(dl,c[0],c[1],axes,fov_deg,cpos,csz,wc,1.f);
     draw_world_line(dl,c[1],c[2],axes,fov_deg,cpos,csz,wc,1.f);
@@ -117,10 +123,11 @@ static void draw_room(ImDrawList* dl, const CamAxes& axes, float fov_deg, ImVec2
 static void draw_floor_grid(ImDrawList* dl, const CamAxes& axes, float fov_deg, ImVec2 cpos, ImVec2 csz)
 {
     const ImU32 gc = IM_COL32(22, 32, 45, 90);
-    for (float x = -kRW; x <= kRW + 0.01f; x += 2.f)
-        draw_world_line(dl,{x,0.f,0.f},{x,0.f,kRD},axes,fov_deg,cpos,csz,gc,0.7f);
-    for (float z = 0.f; z <= kRD + 0.01f; z += 2.f)
-        draw_world_line(dl,{-kRW,0.f,z},{kRW,0.f,z},axes,fov_deg,cpos,csz,gc,0.7f);
+    float grid_step = (s_rd > 30.f) ? 4.f : 2.f;
+    for (float x = -s_rw; x <= s_rw + 0.01f; x += grid_step)
+        draw_world_line(dl,{x,0.f,0.f},{x,0.f,s_rd},axes,fov_deg,cpos,csz,gc,0.7f);
+    for (float z = 0.f; z <= s_rd + 0.01f; z += grid_step)
+        draw_world_line(dl,{-s_rw,0.f,z},{s_rw,0.f,z},axes,fov_deg,cpos,csz,gc,0.7f);
 }
 
 // Draw a small laser unit icon: filled circle (lens) + outer ring.
@@ -166,7 +173,8 @@ static Vec3 wall_hit(float nx, float ny,
 {
     Vec3 dir = apply_laser_rotation(nx, ny, yaw, pitch);
     Vec3 origin{px, py, pz};
-    float t = (19.8f - origin.z) / (dir.z > 0.001f ? dir.z : 0.001f);
+    float back_wall_z = s_rd - 0.2f;  // slightly in front of back wall
+    float t = (back_wall_z - origin.z) / (dir.z > 0.001f ? dir.z : 0.001f);
     return clamp_to_room(origin + dir * t);
 }
 
@@ -192,29 +200,32 @@ static void draw_laser_beams_irl(ImDrawList* dl,
     ImVec2 s_proj;
     bool proj_ok = project_point(origin, axes, fov_deg, canvas_pos, canvas_size, s_proj);
 
-    // Pass 1: aerial beams
+    // Pass 1: aerial haze — per-SEGMENT (not per-point) to avoid dot artefacts.
+    // Each segment midpoint defines one hazy aerial beam from the projector.
     if (proj_ok) {
-        for (int i = 0; i < n; ++i) {
-            const auto& p = pts[i];
-            if (p.blanked) continue;
-            Vec3 w = wall_hit(p.nx(), p.ny(), px, py, pz, yaw, pitch);
-            ImVec2 s_wall;
-            if (!project_point(w, axes, fov_deg, canvas_pos, canvas_size, s_wall))
+        for (int i = 0; i + 1 < n; ++i) {
+            const auto& pa = pts[i];
+            const auto& pb = pts[i + 1];
+            if (pa.blanked || pb.blanked) continue;
+            Vec3 wa = wall_hit(pa.nx(), pa.ny(), px, py, pz, yaw, pitch);
+            Vec3 wb = wall_hit(pb.nx(), pb.ny(), px, py, pz, yaw, pitch);
+            ImVec2 sa, sb;
+            if (!project_point(wa, axes, fov_deg, canvas_pos, canvas_size, sa) ||
+                !project_point(wb, axes, fov_deg, canvas_pos, canvas_size, sb))
                 continue;
+            // Aerial beam aims at midpoint of wall segment
+            ImVec2 s_mid = ImVec2((sa.x + sb.x) * 0.5f, (sa.y + sb.y) * 0.5f);
+            uint8_t r = static_cast<uint8_t>((pa.r + pb.r) / 2);
+            uint8_t g = static_cast<uint8_t>((pa.g + pb.g) / 2);
+            uint8_t b = static_cast<uint8_t>((pa.b + pb.b) / 2);
             uint8_t h1 = static_cast<uint8_t>(haze_a_f * 8.f);
-            uint8_t h2 = static_cast<uint8_t>(haze_a_f * 20.f);
-            uint8_t h3 = static_cast<uint8_t>(haze_a_f * 55.f);
-            uint8_t h4 = static_cast<uint8_t>(haze_a_f * 120.f);
-            dl->AddLine(s_proj, s_wall, IM_COL32(p.r, p.g, p.b, h1), glow_r * 1.5f);
-            dl->AddLine(s_proj, s_wall, IM_COL32(p.r, p.g, p.b, h2), glow_r * 0.7f);
-            dl->AddLine(s_proj, s_wall, IM_COL32(p.r, p.g, p.b, h3), core_w * 1.8f);
-            dl->AddLine(s_proj, s_wall, IM_COL32(p.r, p.g, p.b, h4), core_w);
-            uint8_t wc = static_cast<uint8_t>(std::clamp(brt * 90.f, 0.f, 255.f));
-            dl->AddLine(s_proj, s_wall, IM_COL32(255, 255, 255, wc), core_w * 0.3f);
+            uint8_t h2 = static_cast<uint8_t>(haze_a_f * 18.f);
+            dl->AddLine(s_proj, s_mid, IM_COL32(r, g, b, h1), glow_r * 1.2f);
+            dl->AddLine(s_proj, s_mid, IM_COL32(r, g, b, h2), glow_r * 0.4f);
         }
     }
 
-    // Pass 2: wall hit marks for connected segments
+    // Pass 2: bright wall connections — primary visual (the actual laser pattern on wall).
     for (int i = 0; i + 1 < n; ++i) {
         const auto& pa = pts[i];
         const auto& pb = pts[i + 1];
@@ -225,8 +236,12 @@ static void draw_laser_beams_irl(ImDrawList* dl,
         if (!project_point(wa, axes, fov_deg, canvas_pos, canvas_size, sa) ||
             !project_point(wb, axes, fov_deg, canvas_pos, canvas_size, sb))
             continue;
-        uint8_t wa_a = static_cast<uint8_t>(std::clamp(brt * 25.f, 0.f, 255.f));
-        dl->AddLine(sa, sb, IM_COL32(pa.r, pa.g, pa.b, wa_a), glow_r * 0.3f);
+        uint8_t wa_glow = static_cast<uint8_t>(std::clamp(brt * 55.f,  0.f, 255.f));
+        uint8_t wa_core = static_cast<uint8_t>(std::clamp(brt * 210.f, 0.f, 255.f));
+        uint8_t wa_hot  = static_cast<uint8_t>(std::clamp(brt * 160.f, 0.f, 255.f));
+        dl->AddLine(sa, sb, IM_COL32(pa.r, pa.g, pa.b, wa_glow), glow_r * 0.9f);
+        dl->AddLine(sa, sb, IM_COL32(pa.r, pa.g, pa.b, wa_core), core_w);
+        dl->AddLine(sa, sb, IM_COL32(255,  255,  255,  wa_hot),  core_w * 0.3f);
     }
 }
 
@@ -377,6 +392,18 @@ void panel_3d_preview(UIState& state, bool* p_open)
             }
         }
 
+        // Update room + projection statics from current settings.
+        // These are read by all helper functions (draw_room, clamp_to_room, etc.).
+        s_rw = std::max(1.f, state.preview_3d.room_half_width);
+        s_rh = std::max(1.f, state.preview_3d.room_height);
+        s_rd = std::max(5.f, state.preview_3d.room_depth);
+        s_ps = std::max(0.1f, state.preview_3d.proj_scale);
+
+        // Re-clamp camera target to new room bounds whenever room size changes.
+        cam.target.x = std::clamp(cam.target.x, -s_rw, s_rw);
+        cam.target.y = std::clamp(cam.target.y,  0.f,  s_rh);
+        cam.target.z = std::clamp(cam.target.z,  0.f,  s_rd);
+
         CamAxes axes = build_axes(cam);
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
@@ -411,38 +438,45 @@ void panel_3d_preview(UIState& state, bool* p_open)
                 const float core_w   = std::clamp(p3d.beam_width_px, 0.5f, 6.f);
                 const float haze_a_f = std::clamp(p3d.haze_alpha * brt, 0.f, 1.f);
 
+                // Pass 1: aerial haze — per-SEGMENT midpoints (avoids dot artefacts at individual
+                // point positions that plagued the old per-point loop).
                 if (proj_ok) {
-                    for (int i = 0; i < n; ++i) {
-                        const auto& p = pts[i];
-                        if (p.blanked) continue;
-                        Vec3 wall = clamp_to_room({p.nx() * 5.1f, 2.5f + p.ny() * 2.0f, 19.8f});
-                        ImVec2 s_wall;
-                        if (!project_point(wall, axes, cam.fov_deg, canvas_pos, canvas_size, s_wall))
+                    for (int i = 0; i + 1 < n; ++i) {
+                        const auto& pa = pts[i];
+                        const auto& pb = pts[i + 1];
+                        if (pa.blanked || pb.blanked) continue;
+                        Vec3 wa = clamp_to_room({pa.nx() * s_ps, s_rh * 0.5f + pa.ny() * s_ps, s_rd - 0.2f});
+                        Vec3 wb = clamp_to_room({pb.nx() * 5.1f, 2.5f + pb.ny() * 2.0f, 19.8f});
+                        Vec3 w_mid = {(wa.x + wb.x) * 0.5f, (wa.y + wb.y) * 0.5f, (wa.z + wb.z) * 0.5f};
+                        ImVec2 s_mid;
+                        if (!project_point(w_mid, axes, cam.fov_deg, canvas_pos, canvas_size, s_mid))
                             continue;
+                        uint8_t r = static_cast<uint8_t>((pa.r + pb.r) / 2);
+                        uint8_t g = static_cast<uint8_t>((pa.g + pb.g) / 2);
+                        uint8_t b = static_cast<uint8_t>((pa.b + pb.b) / 2);
                         uint8_t h1 = static_cast<uint8_t>(haze_a_f * 8.f);
-                        uint8_t h2 = static_cast<uint8_t>(haze_a_f * 20.f);
-                        uint8_t h3 = static_cast<uint8_t>(haze_a_f * 55.f);
-                        uint8_t h4 = static_cast<uint8_t>(haze_a_f * 120.f);
-                        dl->AddLine(s_proj, s_wall, IM_COL32(p.r, p.g, p.b, h1), glow_r * 1.5f);
-                        dl->AddLine(s_proj, s_wall, IM_COL32(p.r, p.g, p.b, h2), glow_r * 0.7f);
-                        dl->AddLine(s_proj, s_wall, IM_COL32(p.r, p.g, p.b, h3), core_w * 1.8f);
-                        dl->AddLine(s_proj, s_wall, IM_COL32(p.r, p.g, p.b, h4), core_w);
-                        uint8_t wc = static_cast<uint8_t>(std::clamp(brt * 90.f, 0.f, 255.f));
-                        dl->AddLine(s_proj, s_wall, IM_COL32(255, 255, 255, wc), core_w * 0.3f);
+                        uint8_t h2 = static_cast<uint8_t>(haze_a_f * 18.f);
+                        dl->AddLine(s_proj, s_mid, IM_COL32(r, g, b, h1), glow_r * 1.2f);
+                        dl->AddLine(s_proj, s_mid, IM_COL32(r, g, b, h2), glow_r * 0.4f);
                     }
                 }
+                // Pass 2: bright wall connections — primary visual (actual laser pattern on wall).
                 for (int i = 0; i + 1 < n; ++i) {
                     const auto& pa = pts[i];
                     const auto& pb = pts[i + 1];
                     if (pa.blanked || pb.blanked) continue;
-                    Vec3 wa = clamp_to_room({pa.nx() * 5.1f, 2.5f + pa.ny() * 2.0f, 19.8f});
+                    Vec3 wa = clamp_to_room({pa.nx() * s_ps, s_rh * 0.5f + pa.ny() * s_ps, s_rd - 0.2f});
                     Vec3 wb = clamp_to_room({pb.nx() * 5.1f, 2.5f + pb.ny() * 2.0f, 19.8f});
                     ImVec2 sa, sb;
                     if (!project_point(wa, axes, cam.fov_deg, canvas_pos, canvas_size, sa) ||
                         !project_point(wb, axes, cam.fov_deg, canvas_pos, canvas_size, sb))
                         continue;
-                    uint8_t wa_a = static_cast<uint8_t>(std::clamp(brt * 25.f, 0.f, 255.f));
-                    dl->AddLine(sa, sb, IM_COL32(pa.r, pa.g, pa.b, wa_a), glow_r * 0.3f);
+                    uint8_t wa_glow = static_cast<uint8_t>(std::clamp(brt * 55.f,  0.f, 255.f));
+                    uint8_t wa_core = static_cast<uint8_t>(std::clamp(brt * 210.f, 0.f, 255.f));
+                    uint8_t wa_hot  = static_cast<uint8_t>(std::clamp(brt * 160.f, 0.f, 255.f));
+                    dl->AddLine(sa, sb, IM_COL32(pa.r, pa.g, pa.b, wa_glow), glow_r * 0.9f);
+                    dl->AddLine(sa, sb, IM_COL32(pa.r, pa.g, pa.b, wa_core), core_w);
+                    dl->AddLine(sa, sb, IM_COL32(255,  255,  255,  wa_hot),  core_w * 0.3f);
                 }
             } else {
                 static double s_scan_accum = 0.0;
@@ -463,7 +497,7 @@ void panel_3d_preview(UIState& state, bool* p_open)
                     const auto& pa = pts[i];
                     const auto& pb = pts[i + 1];
                     if (pa.blanked || pb.blanked) continue;
-                    Vec3 wa = clamp_to_room({pa.nx() * 5.1f, 2.5f + pa.ny() * 2.0f, 19.8f});
+                    Vec3 wa = clamp_to_room({pa.nx() * s_ps, s_rh * 0.5f + pa.ny() * s_ps, s_rd - 0.2f});
                     Vec3 wb = clamp_to_room({pb.nx() * 5.1f, 2.5f + pb.ny() * 2.0f, 19.8f});
                     ImVec2 sa, sb;
                     if (project_point(wa, axes, cam.fov_deg, canvas_pos, canvas_size, sa) &&
@@ -482,7 +516,7 @@ void panel_3d_preview(UIState& state, bool* p_open)
                         if (pa.blanked) continue;
                         float age  = static_cast<float>(ti) / static_cast<float>(trail_len);
                         float fade = (1.f - age) * (1.f - age);
-                        Vec3 wa = clamp_to_room({pa.nx() * 5.1f, 2.5f + pa.ny() * 2.0f, 19.8f});
+                        Vec3 wa = clamp_to_room({pa.nx() * s_ps, s_rh * 0.5f + pa.ny() * s_ps, s_rd - 0.2f});
                         ImVec2 s_wall;
                         if (!project_point(wa, axes, cam.fov_deg, canvas_pos, canvas_size, s_wall))
                             continue;
@@ -495,7 +529,7 @@ void panel_3d_preview(UIState& state, bool* p_open)
                 if (proj_ok && n > 0) {
                     const auto& pa = pts[scan_head];
                     if (!pa.blanked) {
-                        Vec3 wa = clamp_to_room({pa.nx() * 5.1f, 2.5f + pa.ny() * 2.0f, 19.8f});
+                        Vec3 wa = clamp_to_room({pa.nx() * s_ps, s_rh * 0.5f + pa.ny() * s_ps, s_rd - 0.2f});
                         ImVec2 s_wall;
                         if (project_point(wa, axes, cam.fov_deg, canvas_pos, canvas_size, s_wall)) {
                             uint8_t b1 = static_cast<uint8_t>(std::clamp(brt * 12.f, 0.f, 255.f));

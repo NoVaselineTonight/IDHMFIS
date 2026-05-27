@@ -40,20 +40,25 @@ void BlockSymmetry::process(PointBuffer& buf, float dt, const ExprContext& /*ctx
     scratch_.clear();
     scratch_.reserve(static_cast<size_t>(src_count * folds));
 
-    for (int i = 0; i < src_count; ++i) {
-        const LaserPoint& src = buf[static_cast<size_t>(i)];
-        float nx = static_cast<float>(src.x) * kInv - cx;
-        float ny = static_cast<float>(src.y) * kInv - cy;
+    // Outer loop must iterate folds, inner loop source points.
+    // This produces N complete sequential paths (one per fold arm) which the
+    // scanner traces as separate, closed paths.  The previous order (outer=src,
+    // inner=fold) interleaved fold copies per-point, causing the scanner to
+    // zigzag between arms on every step — visually a chaotic mess.
+    for (int f = 0; f < folds; ++f) {
+        float angle = step * static_cast<float>(f);
+        float ca    = std::cos(angle);
+        float sa    = std::sin(angle);
+        bool  flip  = mirror && (f & 1);
 
-        for (int f = 0; f < folds; ++f) {
-            float angle = step * static_cast<float>(f);
-            bool  flip  = mirror && (f & 1);
+        for (int i = 0; i < src_count; ++i) {
+            const LaserPoint& src = buf[static_cast<size_t>(i)];
+            float nx = static_cast<float>(src.x) * kInv - cx;
+            float ny = static_cast<float>(src.y) * kInv - cy;
 
             float sx = flip ? -nx : nx;
             float sy = ny;
 
-            float ca = std::cos(angle);
-            float sa = std::sin(angle);
             float rx = sx * ca - sy * sa + cx;
             float ry = sx * sa + sy * ca + cy;
 

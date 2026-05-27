@@ -13,7 +13,8 @@ bool ScanFailMonitor::tick(float x, float y, float dt_ms)
 
     // Once triggered, stay triggered until reset() is called.
     // The interlock must be cleared by an operator, not automatically.
-    if (triggered_)
+    // BUG #7 fix: use atomic load so the UI-thread reset() write is visible here.
+    if (triggered_.load(std::memory_order_seq_cst))
         return true;
 
     // Guard against pathological dt values (e.g. first tick, debugger pause)
@@ -31,16 +32,21 @@ bool ScanFailMonitor::tick(float x, float y, float dt_ms)
     float velocity = dist / dt_ms;
 
     if (velocity < cfg_.min_velocity) {
-        // Beam is effectively still
-        still_ms_ += dt_ms;
+        // Beam is effectively still.
+        // BUG #7 fix: still_ms_ is also accessed from the UI thread (reset/reset_still);
+        // use atomic load/store. Read-modify-write via local copy is safe here because
+        // tick() is called from a single engine thread, so no concurrent write from
+        // another tick() call can interleave.
+        float sm = still_ms_.load(std::memory_order_relaxed) + dt_ms;
+        still_ms_.store(sm, std::memory_order_relaxed);
 
-        if (still_ms_ >= cfg_.max_still_ms) {
-            triggered_ = true;
+        if (sm >= cfg_.max_still_ms) {
+            triggered_.store(true, std::memory_order_seq_cst);
             return true;
         }
     } else {
         // Beam is moving — reset the still counter
-        still_ms_ = 0.f;
+        still_ms_.store(0.f, std::memory_order_relaxed);
     }
 
     last_x_ = x;

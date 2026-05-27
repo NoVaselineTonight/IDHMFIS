@@ -217,6 +217,7 @@ struct Project {
         std::string ndi_net_source_name = "IDHMFIS Laser Preview";
         int         ndi_net_bandwidth   = 1;
         int         ndi_net_fps         = 30;
+        int         dmx_universe_offset  = 0;  // shifts the universe number in all DMX trigger lookups
     };
     NetworkConfig net_config;
 
@@ -254,6 +255,10 @@ struct Project {
         float haze_alpha      = 0.35f;
         float wall_glow_px    = 5.f;
         float beam_width_px   = 1.5f;
+        float room_half_width = 6.f;   // half-width of room in metres
+        float room_height     = 5.f;   // floor-to-ceiling height
+        float room_depth      = 20.f;  // depth (front to back wall)
+        float proj_scale      = 3.0f;  // laser projection half-size on back wall
     };
     Preview3dSettings preview_3d;
 
@@ -281,6 +286,11 @@ struct Project {
 
     // --- Active stream IDs (programmer targets) ---
     std::vector<int> active_stream_ids;
+
+    // --- Programmer broadcast mode ---
+    // true = send to all enabled outputs (ignores active_stream_ids).
+    // Default true for backward compat with files that don't have this field.
+    bool broadcast_to_all = true;
 
     // --- UI layout state (persisted to show file) ---
     struct LayoutSave {
@@ -337,6 +347,22 @@ struct Project {
     // Returns true if the given version string is older than "1.0.0".
     static bool needs_migration(const std::string& schema_ver);
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ProjectLoadResult — returned by project_load_full() for graceful degradation
+// ─────────────────────────────────────────────────────────────────────────────
+struct ProjectLoadResult {
+    Project                  project;
+    bool                     ok                = false;
+    bool                     integrity_ok      = true;
+    bool                     integrity_present = false;
+    std::vector<std::string> warnings;
+    std::string              fatal_error;
+};
+
+// Load with integrity check and per-section graceful degradation.
+// Never throws — errors are reported in the returned result.
+ProjectLoadResult project_load_full(const std::string& path);
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  ProjectLoadError — structured error type for load failures

@@ -364,17 +364,30 @@ int OscServer::parse_osc_bundle(const uint8_t* data, int len) {
     int dispatched = 0;
 
     while (cursor + 4 <= len) {
-        uint32_t element_size = read_be32(data + cursor);
+        uint32_t raw_element_size = read_be32(data + cursor);
         cursor += 4;
 
-        if (element_size == 0) break;
-        if (cursor + static_cast<int>(element_size) > len) {
+        // BUG #51: validate element_size before use to prevent int overflow
+        // and infinite loops. Per OSC spec, element_size must be > 0 and fit
+        // within the remaining bundle data.
+        if (raw_element_size == 0) {
+            log::warn("OSC: zero element_size in bundle, stopping parse");
+            break;
+        }
+        // Guard against values that would overflow int or exceed remaining data
+        if (raw_element_size > static_cast<uint32_t>(INT_MAX / 2) ||
+            cursor + static_cast<int>(raw_element_size) > len) {
+            log::warn("OSC: invalid element_size %u at bundle offset %d, stopping parse",
+                      raw_element_size, cursor - 4);
             errors_.fetch_add(1, std::memory_order_relaxed);
             break;
         }
 
+        int elem_len = static_cast<int>(raw_element_size);
+        // OSC spec requires element sizes to be 4-byte aligned
+        int elem_len_aligned = (elem_len + 3) & ~3;
+
         const uint8_t* elem = data + cursor;
-        int elem_len = static_cast<int>(element_size);
 
         if (elem_len >= 8 && std::memcmp(elem, "#bundle\0", 8) == 0) {
             // Nested bundle — recurse
@@ -390,7 +403,10 @@ int OscServer::parse_osc_bundle(const uint8_t* data, int len) {
             }
         }
 
-        cursor += static_cast<int>(element_size);
+        // Advance by the aligned size; guard against running past end
+        if (cursor + elem_len_aligned > len)
+            break;
+        cursor += elem_len_aligned;
     }
 
     return dispatched;

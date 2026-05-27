@@ -444,7 +444,7 @@ struct PlaybackConfig {
     enum class DmxMode { Off, OneChannel, TwoChannel };
     DmxMode dmx_mode      = DmxMode::Off;
     int     dmx_universe  = 0;        // 0-based
-    int     dmx_channel   = 0;        // 0-based (0-511)
+    int     dmx_channel   = 1;        // 1-based (1-512); engine subtracts 1 for array indexing
     uint8_t dmx_threshold = 10;       // value above = active
 
     enum class EndBehavior { Stop, Loop };

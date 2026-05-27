@@ -374,6 +374,7 @@ DacStatus EtherDreamDac::status() const {
 bool EtherDreamDac::set_point_rate(int pps) {
     if (pps < kEDMinPPS || pps > kEDMaxPPS) return false;
     std::lock_guard<std::mutex> lk(mutex_);
+    if (pps == point_rate_) return true; // no-op: rate unchanged, avoids redundant BEGIN
     point_rate_ = pps;
     cached_status_.point_rate = pps;
     // Re-issue BEGIN with new rate if already streaming
@@ -393,7 +394,11 @@ bool EtherDreamDac::set_point_rate(int pps) {
 //  send_points
 // ─────────────────────────────────────────────────────────────────────────────
 int EtherDreamDac::send_points(const PointBuffer& pts) {
-    std::lock_guard<std::mutex> lk(mutex_);
+    // H-21: use unique_lock so we can release the mutex around blocking I/O
+    // (send_cmd_ping) and sleep_for, which previously held mutex_ across an
+    // up-to-10 ms sleep, stalling any concurrent accessor (e.g. status reads
+    // from the UI thread).
+    std::unique_lock<std::mutex> lk(mutex_);
     if (!open_ || pts.empty()) return 0;
 
     // Convert
@@ -405,11 +410,19 @@ int EtherDreamDac::send_points(const PointBuffer& pts) {
     int sent      = 0;
     int remaining = static_cast<int>(converted.size());
 
+    int ping_retries = 0;
+    static constexpr int kMaxPingRetries = 20; // ~10 ms of 500 µs sleeps before giving up
     while (remaining > 0) {
         // Respect low-water-mark: don't flood the buffer
         if (buffer_free_ <= 0) {
-            // Give a small yield — the DAC is consuming points
+            // Release lock during sleep so other threads aren't blocked for up
+            // to 10 ms.  Re-check open_ after reacquiring.
+            lk.unlock();
             std::this_thread::sleep_for(std::chrono::microseconds(500));
+            lk.lock();
+
+            if (!open_) break; // Close() called while we were sleeping
+
             // Ping to refresh buffer_free_
             if (!send_cmd_ping()) {
                 log::warn("EtherDream: ping failed, assuming disconnect");
@@ -417,13 +430,24 @@ int EtherDreamDac::send_points(const PointBuffer& pts) {
                 streaming_ = false;
                 cached_status_.connected = false;
                 cached_status_.error = "ping timeout";
+                // BUG #36: close the TCP socket immediately so the fd is not
+                // leaked until the next explicit close() call.
+                tcp_disconnect();
                 break;
             }
         }
 
         int space  = std::max(0, buffer_free_);
         int chunk  = std::min({ remaining, space, kEDMaxPoints });
-        if (chunk <= 0) continue;
+        if (chunk <= 0) {
+            if (++ping_retries > kMaxPingRetries) {
+                log::warn("EtherDream: buffer full after %d pings, dropping %d points",
+                          kMaxPingRetries, remaining);
+                break;
+            }
+            continue;
+        }
+        ping_retries = 0;
 
         if (!send_data_chunk(converted.data() + sent, chunk)) {
             log::warn("EtherDream: DATA failed, assuming disconnect");
@@ -460,16 +484,12 @@ std::string EtherDreamDac::name() const {
 }
 
 bool EtherDreamDac::send_frame(const PointBuffer& pts, int target_pps) {
-    // Negotiate rate: clamp to EtherDream hardware limits
+    // Negotiate rate: clamp to EtherDream hardware limits.
+    // Always call set_point_rate — it now early-returns cheaply when the rate
+    // is already correct, eliminating the prior TOCTOU between the check-under-lock
+    // and the re-acquisition inside set_point_rate.
     int clamped = std::clamp(target_pps, kEDMinPPS, kEDMaxPPS);
-    bool rate_changed = false;
-    {
-        std::lock_guard<std::mutex> lk(mutex_);
-        rate_changed = (clamped != point_rate_);
-    }
-    if (rate_changed) {
-        set_point_rate(clamped); // re-issues BEGIN with new rate
-    }
+    set_point_rate(clamped);
     int sent = send_points(pts);
     return sent == static_cast<int>(pts.size());
 }

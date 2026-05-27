@@ -166,11 +166,11 @@ PointBuffer ILDASequence::read_fmt_5(std::ifstream& f, int count) {
 }
 
 PointBuffer ILDASequence::frame_at(double t, float fps) const {
-    if (frames_.empty()) return {};
-    int idx = static_cast<int>(t * fps);
-    idx %= static_cast<int>(frames_.size());
-    if (idx < 0) idx += static_cast<int>(frames_.size());
-    return frames_[idx].points;
+    int n_frames = static_cast<int>(frames_.size());
+    if (n_frames == 0) return {};
+    int64_t raw = static_cast<int64_t>(t * static_cast<double>(fps));
+    int idx = static_cast<int>(((raw % n_frames) + n_frames) % n_frames);
+    return frames_[static_cast<size_t>(idx)].points;
 }
 
 } // namespace idhmfis

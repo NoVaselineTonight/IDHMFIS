@@ -24,6 +24,7 @@
 #include "../project/ilda.h"
 #include "../project/auto_save.h"
 #include "../project/project_io.h"
+#include "../input/input_router.h"
 
 #include <filesystem>
 
@@ -42,12 +43,14 @@
     #include <d3dcompiler.h>
     #include <shellapi.h>
     #include <commdlg.h>
+    #include <shlobj.h>      // IFileOpenDialog / IFileSaveDialog / SHCreateItemFromParsingName
     #include <direct.h>
     #pragma comment(lib, "d3d12")
     #pragma comment(lib, "dxgi")
     #pragma comment(lib, "d3dcompiler")
     #pragma comment(lib, "shell32")
     #pragma comment(lib, "comdlg32")
+    #pragma comment(lib, "ole32")   // CoInitializeEx, CoCreateInstance, CoTaskMemFree
     #pragma comment(lib, "gdi32")
 #else
     // macOS / Linux — use Vulkan
@@ -101,36 +104,102 @@ static std::string win32_get_showfiles_dir() {
     return fallback.string();
 }
 
+// Bug 24: replaced legacy OFN dialogs with IFileOpenDialog/IFileSaveDialog (Vista+ COM API).
+// The old GetOpenFileNameA/GetSaveFileNameA honour lpstrInitialDir ONLY when the registry
+// has no last-visited folder for this app, making the Showfiles shortcut unreliable.
+// IFileOpenDialog::SetFolder() always overrides the registry entry.
+
 static std::string win32_open_file_dialog(HWND parent) {
-    char buf[MAX_PATH]{};
-    OPENFILENAMEA ofn{};
-    std::string sf = win32_get_showfiles_dir();
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner   = parent;
-    ofn.lpstrFilter = "IDHMFIS Show\0*.idhmfis\0All Files\0*.*\0\0";
-    ofn.lpstrFile   = buf;
-    ofn.nMaxFile    = MAX_PATH;
-    ofn.lpstrInitialDir = sf.c_str();
-    ofn.lpstrDefExt = "idhmfis";
-    ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    return GetOpenFileNameA(&ofn) ? std::string(buf) : std::string{};
+    // Initialise COM for this call (idempotent — returns S_FALSE if already init'd).
+    HRESULT hr_co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    bool uninit = (hr_co == S_OK || hr_co == S_FALSE);
+
+    std::string result;
+    IFileOpenDialog* pDlg = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL,
+                                  IID_IFileOpenDialog, reinterpret_cast<void**>(&pDlg));
+    if (SUCCEEDED(hr)) {
+        // SetFolder() always opens in Showfiles — overrides the MRU registry key.
+        std::string sf = win32_get_showfiles_dir();
+        std::wstring wsf(sf.begin(), sf.end());
+        IShellItem* pFolder = nullptr;
+        SHCreateItemFromParsingName(wsf.c_str(), nullptr, IID_IShellItem,
+                                    reinterpret_cast<void**>(&pFolder));
+        if (pFolder) { pDlg->SetFolder(pFolder); pFolder->Release(); }
+
+        COMDLG_FILTERSPEC flt[] = {
+            { L"IDHMFIS Show", L"*.idhmfis" },
+            { L"All Files",    L"*.*"        }
+        };
+        pDlg->SetFileTypes(ARRAYSIZE(flt), flt);
+        pDlg->SetDefaultExtension(L"idhmfis");
+
+        hr = pDlg->Show(parent);
+        if (SUCCEEDED(hr)) {
+            IShellItem* pItem = nullptr;
+            if (SUCCEEDED(pDlg->GetResult(&pItem))) {
+                PWSTR pszPath = nullptr;
+                if (SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszPath)) && pszPath) {
+                    int len = WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, nullptr, 0, nullptr, nullptr);
+                    if (len > 1) { result.resize(static_cast<size_t>(len - 1));
+                        WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, &result[0], len, nullptr, nullptr); }
+                    CoTaskMemFree(pszPath);
+                }
+                pItem->Release();
+            }
+        }
+        pDlg->Release();
+    }
+    if (uninit) CoUninitialize();
+    return result;
 }
 
 static std::string win32_save_file_dialog(HWND parent, const std::string& default_name) {
-    char buf[MAX_PATH]{};
-    if (!default_name.empty())
-        std::strncpy(buf, default_name.c_str(), MAX_PATH - 1);
-    OPENFILENAMEA ofn{};
-    std::string sf = win32_get_showfiles_dir();
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner   = parent;
-    ofn.lpstrFilter = "IDHMFIS Show\0*.idhmfis\0All Files\0*.*\0\0";
-    ofn.lpstrFile   = buf;
-    ofn.nMaxFile    = MAX_PATH;
-    ofn.lpstrInitialDir = sf.c_str();
-    ofn.lpstrDefExt = "idhmfis";
-    ofn.Flags       = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
-    return GetSaveFileNameA(&ofn) ? std::string(buf) : std::string{};
+    HRESULT hr_co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    bool uninit = (hr_co == S_OK || hr_co == S_FALSE);
+
+    std::string result;
+    IFileSaveDialog* pDlg = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_ALL,
+                                  IID_IFileSaveDialog, reinterpret_cast<void**>(&pDlg));
+    if (SUCCEEDED(hr)) {
+        std::string sf = win32_get_showfiles_dir();
+        std::wstring wsf(sf.begin(), sf.end());
+        IShellItem* pFolder = nullptr;
+        SHCreateItemFromParsingName(wsf.c_str(), nullptr, IID_IShellItem,
+                                    reinterpret_cast<void**>(&pFolder));
+        if (pFolder) { pDlg->SetFolder(pFolder); pFolder->Release(); }
+
+        COMDLG_FILTERSPEC flt[] = {
+            { L"IDHMFIS Show", L"*.idhmfis" },
+            { L"All Files",    L"*.*"        }
+        };
+        pDlg->SetFileTypes(ARRAYSIZE(flt), flt);
+        pDlg->SetDefaultExtension(L"idhmfis");
+
+        if (!default_name.empty()) {
+            std::wstring wdn(default_name.begin(), default_name.end());
+            pDlg->SetFileName(wdn.c_str());
+        }
+
+        hr = pDlg->Show(parent);
+        if (SUCCEEDED(hr)) {
+            IShellItem* pItem = nullptr;
+            if (SUCCEEDED(pDlg->GetResult(&pItem))) {
+                PWSTR pszPath = nullptr;
+                if (SUCCEEDED(pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszPath)) && pszPath) {
+                    int len = WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, nullptr, 0, nullptr, nullptr);
+                    if (len > 1) { result.resize(static_cast<size_t>(len - 1));
+                        WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, &result[0], len, nullptr, nullptr); }
+                    CoTaskMemFree(pszPath);
+                }
+                pItem->Release();
+            }
+        }
+        pDlg->Release();
+    }
+    if (uninit) CoUninitialize();
+    return result;
 }
 #endif
 
@@ -412,13 +481,21 @@ struct Application::Impl {
     std::unique_ptr<ShowEngine> engine;      // constructed after render_bus+audio
     std::unique_ptr<EngineWatchdog> watchdog;
     std::shared_ptr<Project>    project;
+    // InputRouter owns ArtNetListener, sACN, OSC, MIDI; started after engine.
+    // Null until the engine is running; restarted on network config changes.
+    std::unique_ptr<InputRouter> input_router_;
     IldaPool                    ilda_pool;
 
     // Uniform output maps — keyed by patched output id.
     // Laser outputs: one DacManager per id, started on a background thread.
     // HDMI outputs:  one borderless SDL_Window per id.
     // NDI outputs:   handled entirely inside the engine (no extra UI-side object needed).
-    std::unordered_map<int, std::unique_ptr<DacManager>> laser_managers_;
+    // shared_ptr instead of unique_ptr: start and stop threads both capture a
+    // shared_ptr so the DacManager object stays alive until BOTH threads have
+    // completed, regardless of which one runs first.  This eliminates the
+    // use-after-free that occurred when a stop thread called delete before the
+    // corresponding start thread had a chance to enter start().
+    std::unordered_map<int, std::shared_ptr<DacManager>> laser_managers_;
     std::unordered_map<int, int>                          laser_ordinals_; // stream id → last known laser ordinal
     std::unordered_map<int, SDL_Window*>                  hdmi_windows_;
 
@@ -452,13 +529,36 @@ struct Application::Impl {
     // performs the actual blocking load via do_load_project() and clears both
     // fields.  This ensures the user sees the overlay before the OS-level
     // device-probe work (including any netsh/firewall calls) begins.
-    bool             is_loading_show       = false;
+    bool             is_loading_show           = false;
     std::string      pending_load_path_;
+    std::string      pending_integrity_warning_; // non-empty = show integrity warning modal
+    std::string      pending_orphan_recovery_;   // non-empty = show crash-recovery modal
 
     // ── Output patch applying overlay ─────────────────────────────────────────
-    // Counts how many DacManager::stop() calls are running on background threads.
-    // run_frame() shows a blocking overlay while this is > 0.
+    // Counts how many DacManager background operations (start OR stop) are in
+    // flight. run_frame() shows a blocking overlay while this is > 0.
+    // H-16: start() threads are also tracked here so that apply_output_patch
+    // does not remove or delete a DacManager while it is still starting up.
     std::atomic<int> dacs_stopping_{ 0 };
+
+    // ── Post-load / reinit safeguards ─────────────────────────────────────────
+    // post_load_sync_guard_frames_: while > 0, sync_state_from_engine() skips
+    // copying snap.active_stream_ids so stale engine snapshots (produced between
+    // the teardown SetActiveStreams{{}} and the rebuild SetActiveStreams{new})
+    // cannot overwrite the value that do_load_project just restored.
+    // Decremented once per frame in sync_state_from_engine().
+    int  post_load_sync_guard_frames_ = 0;
+    // post_load_reinit_pending_: set after a show load or manual Reinit request.
+    // Once dacs_stopping_ reaches 0 (all DacManagers have finished starting),
+    // run_frame() does one final on_output_patch_changed() to ensure the engine
+    // has the correct bus wiring and the active_stream_ids are propagated.
+    bool post_load_reinit_pending_    = false;
+
+    // ── Output health check epoch ─────────────────────────────────────────────
+    // Last tick (SDL_GetTicks) when check_output_health() ran successfully.
+    // Stored as a member so do_load_project can reset it, ensuring the health
+    // check doesn't fire until at least 5 s after the load fully completes.
+    Uint64 last_health_check_ms_ = 0;
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
     bool init();
@@ -620,10 +720,13 @@ void Application::Impl::sync_state_from_engine() {
     }
 
     // Rebuild CueInfo list from project and cue_list entries.
-    // Trigger when project cue count or cue-list entry count changes.
+    // Trigger when project cue count, cue-list entry count, or cuelist version changes.
+    // The cuelist_version guard ensures INCL picks up reordered or renamed cues
+    // even when the total count stays the same (fixes unreliable INCL, Bug 14).
     bool cues_dirty = project &&
         ((int)state.cues.size() != (int)project->cues.size() ||
-         state.cuelist_entry_count != snap.cuelist_entry_count);
+         state.cuelist_entry_count != snap.cuelist_entry_count ||
+         snap.cuelist_version != state.cuelist_version);
     if (cues_dirty) {
         state.cues.clear();
         state.timeline_cues.clear();
@@ -750,6 +853,17 @@ void Application::Impl::sync_state_from_engine() {
     state.latency_history_idx = (state.latency_history_idx + 1) % UIState::kLatencyHistoryLen;
     state.artnet_latency_ms   = state.latency_history[state.latency_history_idx];
 
+    // Refresh live ArtNet input status from InputRouter (all reads are lock-free atomics)
+    if (input_router_) {
+        auto& s          = state.artnet_input_status;
+        s.running        = input_router_->artnet().is_running();
+        s.packets        = input_router_->artnet().packets_received();
+        s.last_age_ms    = input_router_->artnet().last_packet_age_ms();
+        s.active_universes = input_router_->artnet().active_universe_count();
+    } else {
+        state.artnet_input_status = {};
+    }
+
     // DAC list and zone routing sync
     state.available_dacs = snap.available_dacs;
     state.zones          = snap.zones;
@@ -757,7 +871,17 @@ void Application::Impl::sync_state_from_engine() {
     // Multi-output patch state sync — merge engine status (ndi_active, ndi_conns) back
     // into the UIState.patched_outputs list which the Patch view owns.
     // The config (name, type, settings) is UI-owned; the status fields come from the engine.
-    state.active_stream_ids = snap.active_stream_ids;
+    //
+    // Post-load guard: after a show load (or manual Reinit), suppress the snapshot
+    // copy for a few frames.  Between the teardown SetActiveStreams{{}} and the
+    // rebuild SetActiveStreams{new}, the engine snapshot carries the empty value.
+    // Without this guard that stale {} would overwrite the IDs we just restored,
+    // making the programmer target no streams until the next health-check cycle.
+    if (post_load_sync_guard_frames_ > 0) {
+        --post_load_sync_guard_frames_;
+    } else {
+        state.active_stream_ids = snap.active_stream_ids;
+    }
 
     // Sync per-stream point buffers for 3D preview
     state.stream_previews.clear();
@@ -787,8 +911,11 @@ void Application::Impl::sync_state_from_engine() {
                 }),
             state.laser_placements.end());
 
-        // Ensure an entry exists for every laser
-        for (int id : laser_ids) {
+        // Ensure an entry exists for every laser; auto-assign a default position only
+        // for newly created entries — existing placements keep user-configured positions.
+        const int n = static_cast<int>(laser_ids.size());
+        for (int i = 0; i < n; ++i) {
+            int id = laser_ids[i];
             bool found = std::any_of(state.laser_placements.begin(),
                                      state.laser_placements.end(),
                                      [id](const UIState::LaserPlacement3D& lp) {
@@ -797,24 +924,13 @@ void Application::Impl::sync_state_from_engine() {
             if (!found) {
                 UIState::LaserPlacement3D lp;
                 lp.stream_id = id;
-                state.laser_placements.push_back(lp);
-            }
-        }
-
-        // Recompute X positions from sorted order so the view always matches:
-        // lowest ID = leftmost, spacing = 2 m, centred at X=0.
-        const int n = static_cast<int>(laser_ids.size());
-        for (int i = 0; i < n; ++i) {
-            for (auto& lp : state.laser_placements) {
-                if (lp.stream_id == laser_ids[i]) {
-                    lp.pos_x = static_cast<float>(i) * 2.f
+                lp.pos_x     = static_cast<float>(i) * 2.f
                              - static_cast<float>(n - 1) * 1.f;
-                    lp.pos_y = 3.f;
-                    lp.pos_z = 0.5f;
-                    lp.yaw   = 0.f;
-                    lp.pitch = 0.f;
-                    break;
-                }
+                lp.pos_y     = 3.f;
+                lp.pos_z     = 0.5f;
+                lp.yaw       = 0.f;
+                lp.pitch     = 0.f;
+                state.laser_placements.push_back(lp);
             }
         }
 
@@ -916,7 +1032,14 @@ void Application::Impl::sync_state_from_engine() {
 void Application::Impl::do_load_project(const std::string& path) {
     log::info("project: loading \"%s\"", path.c_str());
     try {
-        Project loaded = Project::load(path);
+        auto load_result = project_load_full(path);
+        if (!load_result.ok) {
+            log::warn("do_load_project: %s", load_result.fatal_error.c_str());
+            return;
+        }
+        if (load_result.integrity_present && !load_result.integrity_ok)
+            pending_integrity_warning_ = path;
+        Project loaded = std::move(load_result.project);
         // Check for crash-recovery autosave — prefer it when it's newer than the main file.
         {
             std::string recovery = AutoSave::recover_path(path);
@@ -936,7 +1059,7 @@ void Application::Impl::do_load_project(const std::string& path) {
                 }
             }
         }
-        *project = std::move(loaded);
+        project = std::make_shared<Project>(std::move(loaded));
         state.project_path = path;
         {
             auto sep = path.find_last_of("\\/");
@@ -960,13 +1083,26 @@ void Application::Impl::do_load_project(const std::string& path) {
         state.bpm_tap_key           = project->bpm_tap_key;
         state.emergency_shutoff_key = project->emergency_shutoff_key;
         for (auto& pb : project->playbacks) {
-            int idx = pb.id;
-            if (idx >= 0 && idx < UIState::kMaxPlaybacks) {
-                state.pb_conf[idx].keyboard_key                = pb.config.keyboard_go_key;
-                state.pb_conf[idx].fade_on_first_trigger       = pb.config.fade_on_first_trigger;
-                state.pb_conf[idx].first_trigger_fade_s        = pb.config.first_trigger_fade_s;
-                state.pb_conf[idx].remember_cuelist_position   = pb.config.remember_cuelist_position;
-                state.pb_conf[idx].output_stream_ids           = pb.config.output_stream_ids;
+            // pb_conf uses 0-based indexing (slot 0 = PB1, slot 1 = PB2, …)
+            // pb.id is 1-based (1..40), so arr_idx = pb.id - 1.
+            int arr_idx = pb.id - 1;
+            if (arr_idx >= 0 && arr_idx < UIState::kMaxPlaybacks) {
+                state.pb_conf[arr_idx].keyboard_key                = pb.config.keyboard_go_key;
+                state.pb_conf[arr_idx].fade_on_first_trigger       = pb.config.fade_on_first_trigger;
+                state.pb_conf[arr_idx].first_trigger_fade_s        = pb.config.first_trigger_fade_s;
+                state.pb_conf[arr_idx].remember_cuelist_position   = pb.config.remember_cuelist_position;
+                state.pb_conf[arr_idx].output_stream_ids           = pb.config.output_stream_ids;
+                // DMX trigger config restore.
+                state.pb_conf[arr_idx].dmx_mode      = static_cast<UIState::PlaybackConf::DmxMode>(static_cast<int>(pb.config.dmx_mode));
+                state.pb_conf[arr_idx].dmx_universe  = pb.config.dmx_universe;
+                state.pb_conf[arr_idx].dmx_channel   = pb.config.dmx_channel;  // stored 1-based, displayed 1-based
+                state.pb_conf[arr_idx].dmx_threshold = static_cast<int>(pb.config.dmx_threshold);
+                state.pb_conf[arr_idx].end_behavior  = static_cast<UIState::PlaybackConf::EndBehavior>(static_cast<int>(pb.config.end_behavior));
+                state.pb_conf[arr_idx].go_at_bpm     = pb.config.go_at_bpm;
+                state.pb_conf[arr_idx].fx_at_bpm     = pb.config.fx_at_bpm;
+                // Re-sync restored config to engine so DMX triggers see current values.
+                if (layout_cbs.on_playback_config)
+                    layout_cbs.on_playback_config(pb.id, state.pb_conf[arr_idx]);
             }
         }
         // Restore palettes
@@ -1005,14 +1141,43 @@ void Application::Impl::do_load_project(const std::string& path) {
         }
         // Restore output patch
         {
-            // Tear down all existing DacManagers before rebuilding so that
-            // any output whose bus ordinal changed (e.g. different number of
-            // outputs in the new project) gets a fresh manager with the correct
-            // bus pointer.  on_output_patch_changed({}) stops and removes them all.
-            // Always tear down before rebuilding so stale DacManagers from the
-            // previous project are stopped before new ones are created.
-            if (layout_cbs.on_output_patch_changed)
-                layout_cbs.on_output_patch_changed({});
+            // Tear down all existing DacManagers INLINE (without calling
+            // on_output_patch_changed({})) to avoid sending SetOutputPatch{{}} to
+            // the engine.  Sending an empty patch forces the engine into legacy mode
+            // (submitting every frame only to bus_ / ordinal-0), which means all
+            // ordinals 1-N receive no frames during the entire teardown window.
+            // More importantly, it can confuse the engine's output_streams_ map so
+            // that when the rebuild's SetOutputPatch{cfgs} arrives, the bus pointer
+            // re-assignment is racing with a stale assignment from the legacy path.
+            //
+            // By skipping SetOutputPatch{{}}, the engine keeps its current
+            // output_streams_ active during the DAC-stop gap.  The rebuild's
+            // SetOutputPatch{cfgs} then performs a clean full reconciliation (NDI
+            // senders for removed streams are shut down, bus pointers are explicitly
+            // re-assigned via the laser_idx counting in the handler, independent of
+            // any migration from old output_streams_).
+            //
+            // We DO send SetActiveStreams{{}} so the programmer stops routing to
+            // stale stream IDs while the new DacManagers are starting up.
+            {
+                log::info("do_load_project: tearing down DacManagers (inline, no engine patch clear)");
+                for (auto& [id, mgr] : laser_managers_) {
+                    auto shared = mgr;
+                    dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
+                    std::thread([shared, this]() mutable {
+                        shared->stop();
+                        dacs_stopping_.fetch_sub(1, std::memory_order_release);
+                    }).detach();
+                }
+                laser_managers_.clear();
+                laser_ordinals_.clear();
+                // Destroy HDMI windows belonging to the outgoing project.
+                for (auto& [id, w] : hdmi_windows_) SDL_DestroyWindow(w);
+                hdmi_windows_.clear();
+                // Blank active streams so the programmer doesn't route to stale IDs.
+                // Intentionally NOT sending SetOutputPatch{{}} — see comment above.
+                engine->send(cmd::SetActiveStreams{{}});
+            }
 
             while (dacs_stopping_.load(std::memory_order_acquire) > 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -1034,11 +1199,16 @@ void Application::Impl::do_load_project(const std::string& path) {
                 layout_ctx.patch_selected_id = state.patched_outputs.front().id;
             else
                 layout_ctx.patch_selected_id = -1;
-            // Restore active_stream_ids BEFORE calling on_output_patch_changed so
-            // step 7 of the callback can correctly propagate them to the engine.
-            // (The first teardown call above cleared state.active_stream_ids to
-            // empty, so without this the engine would end up with no active streams.)
+            // Restore active_stream_ids and broadcast_to_all BEFORE calling
+            // on_output_patch_changed so step 7 of the callback uses the correct
+            // values from the loaded project (teardown above cleared them).
             state.active_stream_ids = project->active_stream_ids;
+            state.broadcast_to_all  = project->broadcast_to_all;
+            // Bug 26: if the project was saved with no active streams and broadcast disabled
+            // (e.g. all streams were deselected before save), nothing would be sent to the DAC
+            // on load.  Fall back to broadcast mode so at least stream 1 gets output.
+            if (!state.broadcast_to_all && state.active_stream_ids.empty() && !state.patched_outputs.empty())
+                state.broadcast_to_all = true;
             if (layout_cbs.on_output_patch_changed) {
                 std::vector<OutputStreamConfig> cfgs;
                 cfgs.reserve(state.patched_outputs.size());
@@ -1046,6 +1216,16 @@ void Application::Impl::do_load_project(const std::string& path) {
                     cfgs.push_back(po.config);
                 layout_cbs.on_output_patch_changed(cfgs);
             }
+            // Post-load safeguards:
+            // (a) Protect state.active_stream_ids from stale engine snapshots for
+            //     10 frames — the teardown sent SetActiveStreams{{}} and the engine
+            //     snapshot won't reflect the new SetActiveStreams{new_active} until
+            //     the engine thread processes it.  sync_state_from_engine() skips
+            //     the copy while this counter is > 0.
+            // (b) Request one deferred re-apply once all DacManager start() threads
+            //     have finished, ensuring clean bus wiring and correct engine state.
+            post_load_sync_guard_frames_ = 10;
+            post_load_reinit_pending_    = true;
         }
         // Restore output groups
         {
@@ -1122,7 +1302,10 @@ void Application::Impl::do_load_project(const std::string& path) {
             dst.ndi_net_source_name  = src.ndi_net_source_name;
             dst.ndi_net_bandwidth    = src.ndi_net_bandwidth;
             dst.ndi_net_fps          = src.ndi_net_fps;
+            dst.dmx_universe_offset   = src.dmx_universe_offset;
         }
+        // Push restored DMX universe offset to engine immediately.
+        engine->send(cmd::SetDmxUniverseOffset{state.net_config.dmx_universe_offset});
         // Restore output config
         {
             const auto& src = project->output_config;
@@ -1147,6 +1330,19 @@ void Application::Impl::do_load_project(const std::string& path) {
             dst.stream_type_artnet_enabled = src.stream_type_artnet_enabled;
             dst.stream_type_idn_enabled    = src.stream_type_idn_enabled;
         }
+        // Bug fix: sync stream-type enables to engine after restoring output config.
+        // do_load_project updates UIState but does not send engine commands — the engine
+        // still holds the previous project's flags, so e.g. stream 1 (DAC) remains
+        // disabled if the old project had it off and the new project has it on.
+        {
+            using Kind = cmd::SetStreamTypeEnabled::Kind;
+            engine->send(cmd::SetStreamTypeEnabled{ Kind::DAC,    state.output_config.stream_type_dac_enabled    });
+            engine->send(cmd::SetStreamTypeEnabled{ Kind::NDI,    state.output_config.stream_type_ndi_enabled    });
+            engine->send(cmd::SetStreamTypeEnabled{ Kind::ArtNet, state.output_config.stream_type_artnet_enabled });
+            engine->send(cmd::SetStreamTypeEnabled{ Kind::IDN,    state.output_config.stream_type_idn_enabled    });
+            for (auto& kv : laser_managers_)
+                kv.second->set_idn_sidecar_enabled(state.output_config.stream_type_idn_enabled);
+        }
         // Restore 3D preview settings
         {
             const auto& src = project->preview_3d;
@@ -1158,6 +1354,10 @@ void Application::Impl::do_load_project(const std::string& path) {
             dst.haze_alpha      = src.haze_alpha;
             dst.wall_glow_px    = src.wall_glow_px;
             dst.beam_width_px   = src.beam_width_px;
+            dst.room_half_width = src.room_half_width;
+            dst.room_height     = src.room_height;
+            dst.room_depth      = src.room_depth;
+            dst.proj_scale      = src.proj_scale;
         }
         // Restore laser placements
         {
@@ -1200,11 +1400,50 @@ void Application::Impl::do_load_project(const std::string& path) {
             engine->send(cmd::CreateTimeline{ std::move(def) });
         }
         engine->send(cmd::SetTimecodeSettings{ project->tc_config });
+        // ── Auto-repair: detect and fix common load anomalies ────────────────
+        // Runs silently every load. Repairs are logged; does not modify the file.
+        {
+            bool repaired = false;
+            // R1: DAC stream type disabled despite patched laser outputs existing.
+            //     This leaves stream 1 dead after loading. Re-enable and re-sync.
+            if (!state.output_config.stream_type_dac_enabled && !state.patched_outputs.empty()) {
+                bool has_laser = false;
+                for (const auto& po : state.patched_outputs)
+                    if (po.type == OutputStreamType::Laser) { has_laser = true; break; }
+                if (has_laser) {
+                    log::warn("auto-repair: DAC stream type was disabled with %zu laser outputs patched — re-enabling",
+                              state.patched_outputs.size());
+                    state.output_config.stream_type_dac_enabled = true;
+                    engine->send(cmd::SetStreamTypeEnabled{
+                        cmd::SetStreamTypeEnabled::Kind::DAC, true });
+                    repaired = true;
+                }
+            }
+            // R2: No active streams and broadcast disabled → nothing outputs.
+            //     Fall back to broadcast so at least all lasers get output.
+            if (!state.broadcast_to_all && state.active_stream_ids.empty() && !state.patched_outputs.empty()) {
+                log::warn("auto-repair: no active streams and broadcast=false — enabling broadcast");
+                state.broadcast_to_all = true;
+                std::vector<int> ids;
+                for (const auto& po : state.patched_outputs)
+                    if (po.type == OutputStreamType::Laser && po.enabled)
+                        ids.push_back(po.id);
+                engine->send(cmd::SetActiveStreams{ ids });
+                state.active_stream_ids = ids;
+                repaired = true;
+            }
+            if (repaired)
+                log::info("auto-repair: show repaired after load");
+        }
         // on_output_patch_changed (called above during patch restoration) sets
         // project_dirty = true so the autosave fires for patch-only edits.
         // Clear the flag here — after ALL restoration is complete — so that a
         // freshly loaded project does not appear modified.
         state.project_dirty = false;
+        // Reset the health-check timer so the 5-second window starts fresh
+        // from the end of load, preventing a spurious eviction of the managers
+        // that were just created by on_output_patch_changed above.
+        last_health_check_ms_ = SDL_GetTicks();
         log::info("do_load_project: loaded '%s'", path.c_str());
     } catch (...) {
         log::warn("do_load_project: failed to load '%s'", path.c_str());
@@ -1238,6 +1477,7 @@ void Application::Impl::do_new_project() {
     // can correctly latch any programmer content that was live on those heads.
     std::vector<int> old_active_ids = state.active_stream_ids;
     state.active_stream_ids.clear();
+    state.broadcast_to_all = true;
 
     // Reset playback snap
     state.snap.playback_count = 0;
@@ -1296,26 +1536,63 @@ void Application::Impl::check_output_health() {
     if (state.patched_outputs.empty()) return;
 
     bool needs_repair = false;
+
+    // ── 1. Detect managers that are completely absent ────────────────────────
     for (const auto& po : state.patched_outputs) {
         if (po.type != OutputStreamType::Laser || !po.enabled) continue;
         auto it = laser_managers_.find(po.id);
         if (it == laser_managers_.end()) {
-            // Manager completely absent — needs to be created
             needs_repair = true;
             log::warn("output_health: no DacManager for laser id=%d — re-applying patch", po.id);
-            break;
         }
-        // Manager exists but not running yet: probe/connect is still in progress — leave it alone.
     }
 
-    if (needs_repair) {
+    // ── 2. Detect managers that exist but whose output thread is stuck ───────
+    // is_healthy() returns true while the manager is still initialising
+    // (last_loop_ms_ == 0) so we never restart a manager mid-probe.
+    // Threshold: 3 s — well above the 33 ms keepalive interval and the
+    // ~150 ms EtherDream discovery window, so only truly stalled threads trigger.
+    // 10 s — with 8 concurrent DacManagers each doing a 2-second EtherDream scan
+    // plus HIDAPI and sidecar opens, 3 s was routinely breached by normal startup
+    // activity, causing false-positive evictions.  10 s still catches genuinely
+    // deadlocked output threads while eliminating false positives.
+    static constexpr int64_t kStuckThresholdMs = 10000;
+    std::vector<int> stuck_ids;
+    for (const auto& po : state.patched_outputs) {
+        if (po.type != OutputStreamType::Laser || !po.enabled) continue;
+        auto it = laser_managers_.find(po.id);
+        if (it == laser_managers_.end()) continue;  // already flagged above
+        if (!it->second->is_healthy(kStuckThresholdMs)) {
+            log::warn("output_health: DacManager id=%d output thread stuck — restarting", po.id);
+            stuck_ids.push_back(po.id);
+        }
+    }
+
+    // ── 3. Evict stuck managers so on_output_patch_changed recreates them ────
+    // Stop them async (shared_ptr keeps the object alive until stop() returns),
+    // erase from the map, then fall through to the re-apply path.
+    for (int id : stuck_ids) {
+        auto it = laser_managers_.find(id);
+        if (it == laser_managers_.end()) continue;
+        auto shared = it->second;           // keep object alive during async stop
+        laser_managers_.erase(id);
+        laser_ordinals_.erase(id);
+        dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
+        std::thread([shared, this]() mutable {
+            shared->stop();
+            dacs_stopping_.fetch_sub(1, std::memory_order_release);
+        }).detach();
+        needs_repair = true;
+    }
+
+    // ── 4. Re-apply the full patch — creates managers for every absent id ────
+    if (needs_repair && layout_cbs.on_output_patch_changed) {
         std::vector<OutputStreamConfig> cfgs;
         cfgs.reserve(state.patched_outputs.size());
         for (const auto& po : state.patched_outputs)
             cfgs.push_back(po.config);
-        if (layout_cbs.on_output_patch_changed)
-            layout_cbs.on_output_patch_changed(cfgs);
-        // on_output_patch_changed step 7 already sends SetActiveStreams — no need to repeat.
+        layout_cbs.on_output_patch_changed(cfgs);
+        // on_output_patch_changed step 7 already sends SetActiveStreams.
     }
 }
 
@@ -1369,13 +1646,13 @@ void Application::Impl::wire_callbacks() {
                 project->bpm_tap_key           = state.bpm_tap_key;
                 project->emergency_shutoff_key = state.emergency_shutoff_key;
                 for (auto& pb : project->playbacks) {
-                    int idx = pb.id;
-                    if (idx >= 0 && idx < UIState::kMaxPlaybacks) {
-                        pb.config.keyboard_go_key              = state.pb_conf[idx].keyboard_key;
-                        pb.config.fade_on_first_trigger        = state.pb_conf[idx].fade_on_first_trigger;
-                        pb.config.first_trigger_fade_s         = state.pb_conf[idx].first_trigger_fade_s;
-                        pb.config.remember_cuelist_position    = state.pb_conf[idx].remember_cuelist_position;
-                        pb.config.output_stream_ids            = state.pb_conf[idx].output_stream_ids;
+                    int arr_idx = pb.id - 1;  // 0-based array index
+                    if (arr_idx >= 0 && arr_idx < UIState::kMaxPlaybacks) {
+                        pb.config.keyboard_go_key              = state.pb_conf[arr_idx].keyboard_key;
+                        pb.config.fade_on_first_trigger        = state.pb_conf[arr_idx].fade_on_first_trigger;
+                        pb.config.first_trigger_fade_s         = state.pb_conf[arr_idx].first_trigger_fade_s;
+                        pb.config.remember_cuelist_position    = state.pb_conf[arr_idx].remember_cuelist_position;
+                        pb.config.output_stream_ids            = state.pb_conf[arr_idx].output_stream_ids;
                     }
                 }
                 // Flush palettes
@@ -1468,6 +1745,7 @@ void Application::Impl::wire_callbacks() {
                     dst.ndi_net_source_name = src.ndi_net_source_name;
                     dst.ndi_net_bandwidth   = src.ndi_net_bandwidth;
                     dst.ndi_net_fps         = src.ndi_net_fps;
+                    dst.dmx_universe_offset  = src.dmx_universe_offset;
                 }
                 // Flush output config
                 {
@@ -1560,17 +1838,24 @@ void Application::Impl::wire_callbacks() {
                     }
                     project->output_group_next_id = state.output_group_next_id;
                 }
-                // Flush engine's current cue list state (mutex-protected snapshot) so
-                // the save captures all FullCueEntry data rather than racing against
-                // sync_cuelist_to_project()'s clear()+repopulate pattern.
-                project->full_cue_list = engine->read_full_cue_list();
-                for (auto& pb : project->playbacks)
-                    pb.cuelist = engine->read_playback_cuelist(pb.id);
-                // Flush live timeline state (tracks, events, record_armed) so that
-                // events recorded during the session are not lost on save.
-                project->timelines = engine->read_timelines();
+                project->broadcast_to_all = state.broadcast_to_all;
+                // Build a thread-safe save copy of the project.
+                // snapshot_project_for_save() holds project_access_mtx_ during the
+                // deep copy, blocking engine command handlers from concurrently
+                // writing project_->full_cue_list or project_->playbacks[n].cuelist.
+                // The UI-owned field flushes above (bpm_tap_key, net_config, etc.)
+                // are already reflected in project->* by the time we copy — because
+                // those fields are only ever written by the UI thread.
+                // Engine-owned fields (full_cue_list, pb.cuelist, timelines) come
+                // from the engine's own authoritative data inside the locked copy.
+                Project save_proj = engine->snapshot_project_for_save();
+                // Copy UI-only fields that we just flushed to project->*
+                // (the snapshot copies from the same shared_ptr so they're already in,
+                // but re-stamp timelines from the thread-safe reader to get the most
+                // current state regardless of when sync_cuelist_to_project last fired).
+                save_proj.timelines = engine->read_timelines();
                 try {
-                    project->save(state.project_path);
+                    save_proj.save(state.project_path);
                     log::info("project: saved \"%s\"", state.project_path.c_str());
                     state.project_dirty = false;
                     AutoSave::clear_recover(state.project_path);
@@ -1604,13 +1889,13 @@ void Application::Impl::wire_callbacks() {
                 project->bpm_tap_key           = state.bpm_tap_key;
                 project->emergency_shutoff_key = state.emergency_shutoff_key;
                 for (auto& pb : project->playbacks) {
-                    int idx = pb.id;
-                    if (idx >= 0 && idx < UIState::kMaxPlaybacks) {
-                        pb.config.keyboard_go_key              = state.pb_conf[idx].keyboard_key;
-                        pb.config.fade_on_first_trigger        = state.pb_conf[idx].fade_on_first_trigger;
-                        pb.config.first_trigger_fade_s         = state.pb_conf[idx].first_trigger_fade_s;
-                        pb.config.remember_cuelist_position    = state.pb_conf[idx].remember_cuelist_position;
-                        pb.config.output_stream_ids            = state.pb_conf[idx].output_stream_ids;
+                    int arr_idx = pb.id - 1;  // 0-based array index
+                    if (arr_idx >= 0 && arr_idx < UIState::kMaxPlaybacks) {
+                        pb.config.keyboard_go_key              = state.pb_conf[arr_idx].keyboard_key;
+                        pb.config.fade_on_first_trigger        = state.pb_conf[arr_idx].fade_on_first_trigger;
+                        pb.config.first_trigger_fade_s         = state.pb_conf[arr_idx].first_trigger_fade_s;
+                        pb.config.remember_cuelist_position    = state.pb_conf[arr_idx].remember_cuelist_position;
+                        pb.config.output_stream_ids            = state.pb_conf[arr_idx].output_stream_ids;
                     }
                 }
                 // Flush palettes
@@ -1703,6 +1988,7 @@ void Application::Impl::wire_callbacks() {
                     dst.ndi_net_source_name = src.ndi_net_source_name;
                     dst.ndi_net_bandwidth   = src.ndi_net_bandwidth;
                     dst.ndi_net_fps         = src.ndi_net_fps;
+                    dst.dmx_universe_offset  = src.dmx_universe_offset;
                 }
                 // Flush output config
                 {
@@ -1797,7 +2083,8 @@ void Application::Impl::wire_callbacks() {
                 project->full_cue_list = engine->read_full_cue_list();
                 for (auto& pb : project->playbacks)
                     pb.cuelist = engine->read_playback_cuelist(pb.id);
-                project->timelines = engine->read_timelines();
+                project->timelines     = engine->read_timelines();
+                project->broadcast_to_all = state.broadcast_to_all;
                 try {
                     project->save(state.project_path);
                     log::info("project: saved (save-as) \"%s\"", state.project_path.c_str());
@@ -2216,18 +2503,56 @@ void Application::Impl::wire_callbacks() {
         state.project_dirty = true;
     };
 
-    // Network configuration applied — store in UIState; engine subsystems read directly
+    // Network configuration applied — store in UIState and restart input listeners.
+    // Previously this callback only saved config to UIState; the ArtNet listener
+    // was never started because InputRouter was never instantiated.  Now it
+    // stops and restarts the InputRouter with the new ArtNetConfig so that
+    // changes in Settings > Network take immediate effect.
     layout_cbs.on_network_config_apply = [this](const UIState::NetworkConfig& cfg) {
         log::info("network: config applied artnet=%d osc_in=%d osc_out=%d citp=%d",
                   (int)cfg.artnet_enabled, (int)cfg.osc_in_enabled,
                   (int)cfg.osc_out_enabled, (int)cfg.citp_enabled);
         if (cfg.artnet_enabled)
-            log::info("network: artnet listen %s:%d uni=%d",
-                      cfg.artnet_listen_ip.c_str(), cfg.artnet_port, cfg.artnet_universe);
+            log::info("network: artnet listen %s:%d net=%d sub=%d uni=%d",
+                      cfg.artnet_listen_ip.c_str(), cfg.artnet_port,
+                      cfg.artnet_net, cfg.artnet_subnet, cfg.artnet_universe);
         if (cfg.osc_in_enabled)
             log::info("network: osc-in %s:%d", cfg.osc_in_ip.c_str(), cfg.osc_in_port);
+
         state.net_config = cfg;
         state.project_dirty = true;
+
+        // Push DMX universe offset to engine so playback triggers update immediately.
+        if (engine)
+            engine->send(cmd::SetDmxUniverseOffset{cfg.dmx_universe_offset});
+
+        // Rebuild and restart the input router with the new ArtNet config.
+        // We always keep the router running (even when artnet_enabled is false)
+        // so OSC/MIDI continue to work; only ArtNet needs the enable guard.
+        if (input_router_) {
+            input_router_->stop();
+            input_router_.reset();
+        }
+        if (engine) {
+            ArtNetConfig an_cfg;
+            if (!cfg.artnet_enabled || cfg.artnet_auto) {
+                // Auto / disabled: bind all-interface on standard port
+                an_cfg.bind_ip = "0.0.0.0";
+                an_cfg.port    = 6454;
+                an_cfg.net     = 0;
+                an_cfg.sub_net = 0;
+            } else {
+                an_cfg.bind_ip = cfg.artnet_listen_ip.empty() ? "0.0.0.0"
+                                                               : cfg.artnet_listen_ip;
+                an_cfg.port    = cfg.artnet_port;
+                an_cfg.net     = static_cast<uint8_t>(cfg.artnet_net);
+                an_cfg.sub_net = static_cast<uint8_t>(cfg.artnet_subnet);
+            }
+            input_router_ = std::make_unique<InputRouter>(*engine);
+            input_router_->start(an_cfg);
+            log::info("network: InputRouter restarted artnet %s:%d net=%d sub=%d",
+                      an_cfg.bind_ip.c_str(), an_cfg.port, an_cfg.net, an_cfg.sub_net);
+        }
     };
 
     // Setup window — beam render params callback (also merges Otaniemi settings)
@@ -2248,12 +2573,33 @@ void Application::Impl::wire_callbacks() {
         engine->send(rc);
     };
 
+    // Laser output quality — pushes optimizer config + point rate to engine
+    layout_cbs.on_setup_laser_quality = [this](const UIState::OutputConfig& oc) {
+        // Build OptimizerConfig from UIState fields
+        OptimizerConfig opt;
+        opt.target_pps             = oc.opt_target_pps;
+        opt.blank_dwell            = oc.opt_blank_dwell;
+        opt.corner_dwell           = oc.opt_corner_dwell;
+        opt.corner_angle_threshold = oc.opt_corner_angle_threshold;
+        opt.enable_reorder         = oc.opt_enable_reorder;
+        opt.enable_overscan_clip   = oc.opt_enable_overscan_clip;
+        opt.overscan_margin        = oc.opt_overscan_margin;
+        engine->send(cmd::SetOptimizerConfig{opt});
+        // Also push the point rate so the DAC submission uses the new value
+        engine->send(cmd::SetPointRate{oc.opt_target_pps});
+        state.dac_pps = oc.opt_target_pps;
+        log::info("setup: laser quality applied pps=%d blank=%.0f corner=%.0f thresh=%.3f",
+                  oc.opt_target_pps, static_cast<double>(oc.opt_blank_dwell),
+                  static_cast<double>(oc.opt_corner_dwell),
+                  static_cast<double>(oc.opt_corner_angle_threshold));
+    };
+
     // Playback DMX trigger + end-behavior + BPM configuration
     layout_cbs.on_playback_config = [this](int pb_id, const UIState::PlaybackConf& conf) {
         PlaybackConfig cfg;
         cfg.dmx_mode      = static_cast<PlaybackConfig::DmxMode>(static_cast<int>(conf.dmx_mode));
         cfg.dmx_universe  = conf.dmx_universe;
-        cfg.dmx_channel   = conf.dmx_channel - 1;  // UI is 1-based, engine is 0-based
+        cfg.dmx_channel   = conf.dmx_channel;  // stored and used as 1-based (1..512)
         cfg.dmx_threshold = static_cast<uint8_t>(conf.dmx_threshold);
         cfg.end_behavior  = static_cast<PlaybackConfig::EndBehavior>(static_cast<int>(conf.end_behavior));
         cfg.go_at_bpm               = conf.go_at_bpm;
@@ -2271,6 +2617,7 @@ void Application::Impl::wire_callbacks() {
         static int frame_counter = 0;
         fce.name = "Frame " + std::to_string(++frame_counter);
         engine->send(cmd::RecordToPlayback{ pb_id, fce });
+        state.pb_cuelist_pb_id = -1;
         state.project_dirty = true;
     };
 
@@ -2431,18 +2778,25 @@ void Application::Impl::wire_callbacks() {
                 // New laser output — create a DacManager draining the engine bus
                 // that corresponds to this output's positional laser slot.
                 RenderBus* bus = engine->extra_laser_bus(ord);
-                auto mgr = std::make_unique<DacManager>(*bus, ord);
+                auto mgr = std::make_shared<DacManager>(*bus, ord);
                 // Apply explicit DAC config if provided
                 if (cfg.dac_type != "auto" && !cfg.dac_type.empty())
                     mgr->force_dac(cfg.dac_type, cfg.dac_address);
                 if (cfg.point_rate > 0)
                     mgr->set_point_rate(cfg.point_rate);
-                // Start on a background thread — never blocks the UI thread
+                // Start on a background thread — never blocks the UI thread.
+                // BUG-B FIX: capture shared_ptr (not raw pointer) so the DacManager
+                // object stays alive until start() completes, even if a concurrent
+                // stop thread runs first and releases the map entry.  No delete in
+                // the stop thread — shared_ptr destructor handles lifetime.
                 log::info("dac: starting DacManager id=%d type=%s addr=%s pps=%d",
                           cfg.id, cfg.dac_type.c_str(), cfg.dac_address.c_str(), cfg.point_rate);
-                DacManager* raw = mgr.get();
-                std::thread([raw]{ raw->start(); }).detach();
-                laser_managers_.emplace(cfg.id, std::move(mgr));
+                laser_managers_.emplace(cfg.id, mgr);
+                dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
+                std::thread([mgr, this]() mutable {
+                    mgr->start();
+                    dacs_stopping_.fetch_sub(1, std::memory_order_release);
+                }).detach();
                 laser_ordinals_[cfg.id] = ord;
             } else {
                 // Existing manager — check if the bus ordinal changed.
@@ -2451,27 +2805,30 @@ void Application::Impl::wire_callbacks() {
                 if (prev_ord != ord) {
                     log::info("dac: laser ordinal changed for id=%d (%d->%d), recreating DacManager",
                               cfg.id, prev_ord, ord);
-                    DacManager* old_raw = it->second.release();
+                    // Capture shared_ptr before erasing from map; no delete in thread.
+                    auto old_mgr = it->second;
                     laser_managers_.erase(it);
                     laser_ordinals_.erase(cfg.id);
                     dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
-                    std::thread([old_raw, this]() {
-                        old_raw->stop();
-                        delete old_raw;
+                    std::thread([old_mgr, this]() mutable {
+                        old_mgr->stop();
                         dacs_stopping_.fetch_sub(1, std::memory_order_release);
                     }).detach();
                     // Recreate on the new bus
                     RenderBus* bus = engine->extra_laser_bus(ord);
-                    auto mgr = std::make_unique<DacManager>(*bus, ord);
+                    auto mgr = std::make_shared<DacManager>(*bus, ord);
                     if (cfg.dac_type != "auto" && !cfg.dac_type.empty())
                         mgr->force_dac(cfg.dac_type, cfg.dac_address);
                     if (cfg.point_rate > 0)
                         mgr->set_point_rate(cfg.point_rate);
                     log::info("dac: starting DacManager id=%d type=%s addr=%s pps=%d",
                               cfg.id, cfg.dac_type.c_str(), cfg.dac_address.c_str(), cfg.point_rate);
-                    DacManager* raw = mgr.get();
-                    std::thread([raw]{ raw->start(); }).detach();
-                    laser_managers_.emplace(cfg.id, std::move(mgr));
+                    laser_managers_.emplace(cfg.id, mgr);
+                    dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
+                    std::thread([mgr, this]() mutable {
+                        mgr->start();
+                        dacs_stopping_.fetch_sub(1, std::memory_order_release);
+                    }).detach();
                     laser_ordinals_[cfg.id] = ord;
                 } else {
                     // Ordinal unchanged — apply any updated config
@@ -2515,11 +2872,17 @@ void Application::Impl::wire_callbacks() {
                     if (cfg.type == OutputStreamType::Laser && cfg.id == id)
                         { found = true; break; }
                 if (!found) {
-                    DacManager* raw = mgr.release();
+                    // BUG-B FIX: capture the shared_ptr by value (not a raw
+                    // pointer).  The map entry is erased below, but the thread
+                    // holds its own reference so the DacManager stays alive until
+                    // stop() returns — even if a concurrent start thread is still
+                    // executing start() on the same object.  No explicit delete:
+                    // the shared_ptr destructor handles it when both threads drop
+                    // their references.
+                    auto shared = mgr;
                     dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
-                    std::thread([raw, this]() {
-                        raw->stop();
-                        delete raw;
+                    std::thread([shared, this]() mutable {
+                        shared->stop();
                         dacs_stopping_.fetch_sub(1, std::memory_order_release);
                     }).detach();
                     to_erase.push_back(id);
@@ -2571,10 +2934,8 @@ void Application::Impl::wire_callbacks() {
                     new_active.push_back(id);
             }
         }
-        if (new_active != state.active_stream_ids) {
-            engine->send(cmd::SetActiveStreams{ new_active });
-            state.active_stream_ids = new_active;
-        }
+        engine->send(cmd::SetActiveStreams{ new_active });
+        state.active_stream_ids = new_active;
 
         // ── 8. Propagate CITP stream names into UIState ────────────────────────
         for (auto& po : state.patched_outputs) {
@@ -2652,6 +3013,38 @@ void Application::Impl::wire_callbacks() {
         // per-stream programmer content in the engine.
         engine->send(cmd::ClearProgrammer{});
     };
+
+    // ── Reinit Streams — force full stop+restart of all DacManagers ──────────
+    // Triggered by the "Reinit" button in the STREAMS window.
+    // Pattern mirrors the do_load_project inline teardown: stop all managers
+    // without sending SetOutputPatch{{}} to the engine (which would create an
+    // unwanted legacy-mode window), then schedule a deferred re-apply via
+    // post_load_reinit_pending_ once all stop() threads have completed.
+    layout_cbs.on_reinit_streams = [this]() {
+        if (state.patched_outputs.empty()) return;
+        log::info("reinit_streams: stopping all DacManagers for full reinit");
+        // Stop and evict every existing DacManager asynchronously.
+        for (auto& [id, mgr] : laser_managers_) {
+            auto shared = mgr;
+            dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
+            std::thread([shared, this]() mutable {
+                shared->stop();
+                dacs_stopping_.fetch_sub(1, std::memory_order_release);
+            }).detach();
+        }
+        laser_managers_.clear();
+        laser_ordinals_.clear();
+        // Blank active streams while managers are restarting.
+        // Do NOT send SetOutputPatch{{}} — see do_load_project teardown comment.
+        engine->send(cmd::SetActiveStreams{{}});
+        // Schedule rebuild: once dacs_stopping_ reaches 0, run_frame() will
+        // fire on_output_patch_changed(cfgs) to recreate all DacManagers and
+        // re-send SetOutputPatch + SetActiveStreams to the engine.
+        post_load_reinit_pending_    = true;
+        post_load_sync_guard_frames_ = 10;
+        log::info("reinit_streams: reinit pending — waiting for stops to complete");
+    };
+
     layout_cbs.on_mirrored_streams_changed = [this](const std::vector<int>& ids) {
         engine->send(cmd::SetMirroredStreams{ ids });
         state.active_mirrored_stream_ids = ids;
@@ -3037,7 +3430,11 @@ bool Application::Impl::init() {
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     // ViewportsEnable requires per-viewport DX12 swapchains — not set up here; leave disabled
     io.ConfigWindowsMoveFromTitleBarOnly = true;
-    io.IniFilename = nullptr;  // DockBuilder owns the layout; prevent stale ini from overriding it
+    // L-10: setting IniFilename = nullptr discarded all user panel customisations
+    // (positions, sizes, splits) on every restart because ImGui never saved them.
+    // Restore persistence to a dedicated file; DockBuilder still owns the INITIAL
+    // layout on first launch (when the ini does not yet exist).
+    io.IniFilename = "idhmfis_imgui.ini";
 
     // Font: load Segoe UI for clean anti-aliased rendering on Windows
     {
@@ -3127,9 +3524,39 @@ bool Application::Impl::init() {
     {
         auto rf = RecentFiles::load();
         rf.prune_missing();
+        rf.save();
         state.recent_files.clear();
         for (const auto& e : rf.entries())
             state.recent_files.push_back(e.path);
+    }
+
+    // Scan for orphaned autosave files from crashed instances. Offer the
+    // most recent one for recovery via a modal shown after the startup dialog.
+    {
+        auto orphans = AutoSave::scan_orphaned_autosaves();
+        // Also check recent files for named-project autosaves left by crashes.
+        // on_clean_shutdown() removes the autosave on a clean exit, so any
+        // autosave that still exists here is from an unclean (crashed) session.
+        for (const auto& rf : state.recent_files) {
+            if (rf.empty()) continue;
+            std::string rpath = AutoSave::recover_path(rf);
+            if (rpath.empty()) continue;
+            // Skip if already present (e.g. found by scan_orphaned_autosaves).
+            bool already = false;
+            for (const auto& o : orphans)
+                if (o == rpath) { already = true; break; }
+            if (!already)
+                orphans.push_back(rpath);
+        }
+        if (!orphans.empty()) {
+            namespace fs = std::filesystem;
+            std::sort(orphans.begin(), orphans.end(),
+                [](const std::string& a, const std::string& b) {
+                    std::error_code ea, eb;
+                    return fs::last_write_time(a, ea) > fs::last_write_time(b, eb);
+                });
+            pending_orphan_recovery_ = orphans.front();
+        }
     }
 
     // Create a blank demo project to seed the engine while the startup dialog
@@ -3173,6 +3600,28 @@ bool Application::Impl::init() {
     watchdog->start();
     log::info("init: engine threads started");
     raw_trace("engine threads started");
+
+    // ── Start input router (ArtNet / sACN / OSC / MIDI) ──────────────────────
+    // Always start so that DMX / OSC arrive even before the user opens Settings.
+    // The ArtNet listener defaults to 0.0.0.0:6454 (all-interface, standard port)
+    // which picks up Chamsys / grandMA / MagicQ on the same LAN or same PC
+    // (Windows SO_REUSEADDR lets IDHMFIS share port 6454 with the console).
+    {
+        const auto& nc = state.net_config;
+        ArtNetConfig an_cfg;
+        an_cfg.bind_ip = (nc.artnet_enabled && !nc.artnet_auto && !nc.artnet_listen_ip.empty())
+                         ? nc.artnet_listen_ip : "0.0.0.0";
+        an_cfg.port    = (nc.artnet_enabled && !nc.artnet_auto)
+                         ? nc.artnet_port : 6454;
+        an_cfg.net     = static_cast<uint8_t>(
+                         (nc.artnet_enabled && !nc.artnet_auto) ? nc.artnet_net     : 0);
+        an_cfg.sub_net = static_cast<uint8_t>(
+                         (nc.artnet_enabled && !nc.artnet_auto) ? nc.artnet_subnet  : 0);
+        input_router_ = std::make_unique<InputRouter>(*engine);
+        input_router_->start(an_cfg);
+        log::info("init: InputRouter started (artnet %s:%d net=%d sub=%d)",
+                  an_cfg.bind_ip.c_str(), an_cfg.port, an_cfg.net, an_cfg.sub_net);
+    }
 
     loading_status_   = "Scanning for DAC devices...";
     loading_progress_ = 0.35f;
@@ -3232,21 +3681,30 @@ bool Application::Impl::init() {
         for (const auto& po : state.patched_outputs)
             init_cfgs.push_back(po.config);
 
-        // Create DacManagers for all Laser outputs
+        // Create DacManagers for all Laser outputs.
+        // BUG-A FIX: track every start thread in dacs_stopping_ (same as the
+        // on_output_patch_changed path) so that the first do_load_project's
+        // teardown wait includes these threads and cannot delete the manager
+        // while start() is still pending execution.  Capture a shared_ptr in the
+        // thread lambda so the object stays alive until start() completes.
         int laser_ord = 0;
         for (const auto& cfg : init_cfgs) {
             if (cfg.type != OutputStreamType::Laser) continue;
             int citp_ord = laser_ord++;
             RenderBus* bus = engine->extra_laser_bus(citp_ord);
-            auto mgr = std::make_unique<DacManager>(*bus, citp_ord);
+            auto mgr = std::make_shared<DacManager>(*bus, citp_ord);
             if (cfg.dac_type != "auto" && !cfg.dac_type.empty())
                 mgr->force_dac(cfg.dac_type, cfg.dac_address);
             if (cfg.point_rate > 0)
                 mgr->set_point_rate(cfg.point_rate);
-            DacManager* raw = mgr.get();
-            std::thread([raw]{ raw->start(); }).detach();
             log::info("init: started DacManager for output id=%d", cfg.id);
-            laser_managers_.emplace(cfg.id, std::move(mgr));
+            laser_managers_.emplace(cfg.id, mgr);
+            laser_ordinals_[cfg.id] = citp_ord;
+            dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
+            std::thread([mgr, this]() mutable {
+                mgr->start();
+                dacs_stopping_.fetch_sub(1, std::memory_order_release);
+            }).detach();
         }
 
         // Create SDL windows for HDMI outputs
@@ -3268,13 +3726,39 @@ bool Application::Impl::init() {
         // Send patch to engine
         engine->send(cmd::SetOutputPatch{ init_cfgs });
 
-        // Set active streams: all enabled laser outputs receive programmer content.
-        std::vector<int> laser_ids;
-        for (const auto& cfg : init_cfgs)
-            if (cfg.type == OutputStreamType::Laser && cfg.enabled)
-                laser_ids.push_back(cfg.id);
-        engine->send(cmd::SetActiveStreams{ laser_ids });
-        state.active_stream_ids = laser_ids;
+        // Set active streams: restore broadcast_to_all and active_stream_ids from
+        // the loaded project so cold-start state matches the saved show.
+        // Previously this always defaulted to broadcast-all regardless of the
+        // project's saved targeting configuration (Bug D).
+        {
+            std::vector<int> laser_ids;
+            for (const auto& cfg : init_cfgs)
+                if (cfg.type == OutputStreamType::Laser && cfg.enabled)
+                    laser_ids.push_back(cfg.id);
+
+            std::vector<int> active_ids;
+            if (project) {
+                state.broadcast_to_all = project->broadcast_to_all;
+                if (project->broadcast_to_all) {
+                    // Broadcast mode: all enabled lasers receive programmer content.
+                    active_ids = laser_ids;
+                } else {
+                    // Per-output mode: restore the saved target set.
+                    // If the saved set is empty (no outputs targeted), fall back to
+                    // broadcast so the project doesn't start silently outputting nothing.
+                    active_ids = project->active_stream_ids.empty()
+                                 ? laser_ids
+                                 : project->active_stream_ids;
+                    if (project->active_stream_ids.empty())
+                        state.broadcast_to_all = true;
+                }
+            } else {
+                // No project — default to broadcast all lasers (demo/new project).
+                active_ids = laser_ids;
+            }
+            engine->send(cmd::SetActiveStreams{ active_ids });
+            state.active_stream_ids = active_ids;
+        }
 
         // Propagate CITP stream names
         for (auto& po : state.patched_outputs) {
@@ -3435,21 +3919,24 @@ void Application::Impl::run_frame() {
     if (state.project_dirty)
         auto_save_.notify_dirty();
     if (project && auto_save_.is_due()) {
-        // Flush engine-owned data into the project snapshot before writing
-        project->full_cue_list = engine->read_full_cue_list();
-        for (auto& pb : project->playbacks)
-            pb.cuelist = engine->read_playback_cuelist(pb.id);
+        // BUG-FIX (crash v4.15): engine-owned fields (full_cue_list, pb.cuelist,
+        // timelines) must NOT be written back to the shared project_ object from
+        // the UI thread.  project_ is the same shared_ptr owned by the engine, so
+        // writing pb.cuelist here races with build_frame() which reads
+        // project_->playbacks[i].cuelist without holding project_access_mtx_.
+        // snapshot_project_for_save() (called below at as_snap creation) already
+        // copies these fields under project_access_mtx_ — no manual flush needed.
         // Flush UI-only fields that live in UIState / LayoutContext, not in project
         project->bpm_tap_key           = state.bpm_tap_key;
         project->emergency_shutoff_key = state.emergency_shutoff_key;
         for (auto& pb : project->playbacks) {
-            int idx = pb.id;
-            if (idx >= 0 && idx < UIState::kMaxPlaybacks) {
-                pb.config.keyboard_go_key              = state.pb_conf[idx].keyboard_key;
-                pb.config.fade_on_first_trigger        = state.pb_conf[idx].fade_on_first_trigger;
-                pb.config.first_trigger_fade_s         = state.pb_conf[idx].first_trigger_fade_s;
-                pb.config.remember_cuelist_position    = state.pb_conf[idx].remember_cuelist_position;
-                pb.config.output_stream_ids            = state.pb_conf[idx].output_stream_ids;
+            int arr_idx = pb.id - 1;  // 0-based array index
+            if (arr_idx >= 0 && arr_idx < UIState::kMaxPlaybacks) {
+                pb.config.keyboard_go_key              = state.pb_conf[arr_idx].keyboard_key;
+                pb.config.fade_on_first_trigger        = state.pb_conf[arr_idx].fade_on_first_trigger;
+                pb.config.first_trigger_fade_s         = state.pb_conf[arr_idx].first_trigger_fade_s;
+                pb.config.remember_cuelist_position    = state.pb_conf[arr_idx].remember_cuelist_position;
+                pb.config.output_stream_ids            = state.pb_conf[arr_idx].output_stream_ids;
             }
         }
         project->color_palette         = state.color_palette;
@@ -3540,6 +4027,7 @@ void Application::Impl::run_frame() {
             dst.ndi_net_source_name = src.ndi_net_source_name;
             dst.ndi_net_bandwidth   = src.ndi_net_bandwidth;
             dst.ndi_net_fps         = src.ndi_net_fps;
+            dst.dmx_universe_offset  = src.dmx_universe_offset;
         }
         // Flush output config
         {
@@ -3604,6 +4092,7 @@ void Application::Impl::run_frame() {
             dst.glow_radius      = src.glow_radius;
         }
         project->active_stream_ids = state.active_stream_ids;
+        project->broadcast_to_all  = state.broadcast_to_all;
         // Flush ui_layout state so reopening the show restores the view
         project->ui_layout.active_view             = static_cast<int>(layout_ctx.active_view);
         project->ui_layout.show_layout_initialised = layout_ctx.show_layout_initialised;
@@ -3633,20 +4122,59 @@ void Application::Impl::run_frame() {
     }
     if (project) {
         bool was_due = auto_save_.is_due();
-        auto_save_.tick(*project, state.project_path);
-        if (was_due)
+        if (was_due) {
+            // Build a thread-safe save copy before passing to auto-save.
+            // auto_save_.tick() serializes the project directly; passing *project
+            // without the lock would race with engine command handlers that write
+            // project_->full_cue_list and project_->playbacks[n].cuelist.
+            Project as_snap = engine->snapshot_project_for_save();
+            as_snap.timelines = engine->read_timelines();
+            auto_save_.tick(as_snap, state.project_path);
             log::debug("autosave: triggered for \"%s\"", state.project_path.c_str());
+        }
     }
 
     // DAC connection status (will come from real subsystems later)
     state.dac_connected = false;
 
+    // ── Post-load / reinit deferred re-apply ──────────────────────────────────
+    // Once all DacManager start() threads have finished (dacs_stopping_ == 0),
+    // fire one final on_output_patch_changed() with the full current patch.
+    // This ensures:
+    //   • The engine has an up-to-date SetOutputPatch with correct bus pointers
+    //   • SetActiveStreams with the restored active_stream_ids is re-sent
+    //   • Any DacManager that failed to start is re-created by the callback's
+    //     "absent manager" detection (same logic as check_output_health repair)
+    // The flag is set by do_load_project and by on_reinit_streams.
+    if (post_load_reinit_pending_ && dacs_stopping_.load(std::memory_order_acquire) == 0) {
+        post_load_reinit_pending_ = false;
+        log::info("run_frame: post-load stream re-init (deferred)");
+        if (layout_cbs.on_output_patch_changed && !state.patched_outputs.empty()) {
+            std::vector<OutputStreamConfig> reinit_cfgs;
+            reinit_cfgs.reserve(state.patched_outputs.size());
+            for (const auto& po : state.patched_outputs)
+                reinit_cfgs.push_back(po.config);
+            layout_cbs.on_output_patch_changed(reinit_cfgs);
+            // Guard active_stream_ids against stale snapshot one more time
+            // since this re-apply sends new SetActiveStreams to the engine.
+            post_load_sync_guard_frames_ = std::max(post_load_sync_guard_frames_, 5);
+        }
+    }
+
     // ── Output health check — every 5 seconds ──────────────────────────────────
+    // Suppressed during the post-load window (post_load_reinit_pending_ or
+    // post_load_sync_guard_frames_ > 0) so that concurrent starts triggered by
+    // do_load_project or on_reinit_streams don't look "stuck" to the health check
+    // before they have had a chance to complete their EtherDream / HIDAPI scans.
+    // do_load_project resets last_health_check_ms_ so the 5-second window starts
+    // fresh from the end of load, not from whenever the previous check fired.
     {
-        static Uint64 s_last_health_ms = 0;
         Uint64 now = SDL_GetTicks();
-        if (now - s_last_health_ms >= 5000u) {
-            s_last_health_ms = now;
+        if (now - last_health_check_ms_ >= 5000u
+            && !post_load_reinit_pending_
+            && post_load_sync_guard_frames_ == 0)
+        {
+            last_health_check_ms_ = now;
             check_output_health();
         }
     }
@@ -4020,21 +4548,33 @@ void Application::Impl::run_frame() {
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                // Detect recent file
-                std::string recent_path;
-                std::string recent_name;
-                {
+                // Detect recent file — loaded once per popup open, not every frame
+                static std::string s_startup_recent_path;
+                static std::string s_startup_recent_name;
+                static bool        s_startup_recent_cached = false;
+                if (!s_startup_recent_cached) {
+                    s_startup_recent_cached = true;
+                    s_startup_recent_path.clear();
+                    s_startup_recent_name.clear();
                     namespace fs = std::filesystem;
                     std::error_code ec;
                     auto rf = RecentFiles::load();
                     for (const auto& e : rf.entries()) {
                         if (fs::exists(e.path, ec)) {
-                            recent_path = e.path;
-                            recent_name = e.name.empty() ? e.path : e.name;
+                            s_startup_recent_path = e.path;
+                            // Show the filename (without extension), not the internal show title
+                            auto sep = e.path.find_last_of("\\/");
+                            std::string fname = (sep != std::string::npos)
+                                                ? e.path.substr(sep + 1) : e.path;
+                            auto dot = fname.find_last_of('.');
+                            if (dot != std::string::npos) fname = fname.substr(0, dot);
+                            s_startup_recent_name = fname.empty() ? e.path : fname;
                             break;
                         }
                     }
                 }
+                const std::string& recent_path = s_startup_recent_path;
+                const std::string& recent_name = s_startup_recent_name;
 
                 float btn_w = 340.f;
 
@@ -4053,6 +4593,7 @@ void Application::Impl::run_frame() {
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.2f,  0.75f, 0.2f,  1.f));
                     std::string cont_label = "Continue: " + recent_name;
                     if (ImGui::Button(cont_label.c_str(), ImVec2(btn_w, 0.f))) {
+                        s_startup_recent_cached = false;
                         pending_load_path_ = recent_path;
                         is_loading_show    = true;
                         ImGui::CloseCurrentPopup();
@@ -4067,14 +4608,8 @@ void Application::Impl::run_frame() {
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.30f, 0.38f, 1.f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.38f, 0.40f, 0.50f, 1.f));
                 if (ImGui::Button("New Show", ImVec2(btn_w, 0.f))) {
-                    project = std::make_shared<Project>();
-                    project->name = "Untitled";
-                    engine->send(cmd::LoadProject{ project });
-                    state.cues.clear();
-                    state.timeline_cues.clear();
-                    state.project_name  = "Untitled";
-                    state.project_path  = "";
-                    state.project_dirty = false;
+                    s_startup_recent_cached = false;
+                    do_new_project();
                     ImGui::CloseCurrentPopup();
                     show_startup_dialog = false;
                 }
@@ -4105,6 +4640,72 @@ void Application::Impl::run_frame() {
             }
             ImGui::PopStyleColor(3);
             ImGui::PopStyleVar(2);
+        }
+
+        // Integrity warning modal — shown once after loading a file with a bad hash
+        if (!pending_integrity_warning_.empty()) {
+            ImGui::OpenPopup("Integrity Warning##iw");
+            pending_integrity_warning_.clear();
+        }
+        if (ImGui::BeginPopupModal("Integrity Warning##iw", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.65f, 0.1f, 1.f));
+            ImGui::TextUnformatted("File integrity check failed.");
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+            ImGui::TextUnformatted("The show file may have been corrupted or tampered with.");
+            ImGui::TextUnformatted("The file was loaded anyway. Verify your show carefully.");
+            ImGui::Spacing();
+            if (ImGui::Button("OK", ImVec2(120, 0)))
+                ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        // Crash-recovery modal — shown once at startup when orphaned autosave found
+        {
+            static bool s_cr_opened = false;
+            if (!show_startup_dialog && !pending_orphan_recovery_.empty() && !s_cr_opened) {
+                ImGui::OpenPopup("Crash Recovery##cr");
+                s_cr_opened = true;
+            }
+            if (ImGui::BeginPopupModal("Crash Recovery##cr", nullptr,
+                                       ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextUnformatted("An unsaved autosave was found from a previous session.");
+                ImGui::Spacing();
+                if (ImGui::Button("Restore", ImVec2(120, 0))) {
+                    // For named-project autosaves ("<orig>.autosave"), pass the
+                    // original path to do_load_project so it sets project_path
+                    // correctly; do_load_project already calls recover_path() and
+                    // loads the newer autosave transparently. For temp-dir autosaves
+                    // (unsaved projects, no ".autosave" suffix) keep the path as-is.
+                    std::string load_path = pending_orphan_recovery_;
+                    static const std::string kSuffix = ".autosave";
+                    if (load_path.size() > kSuffix.size() &&
+                        load_path.compare(load_path.size() - kSuffix.size(),
+                                          kSuffix.size(), kSuffix) == 0) {
+                        std::string orig = load_path.substr(
+                            0, load_path.size() - kSuffix.size());
+                        if (std::filesystem::exists(orig))
+                            load_path = orig;
+                    }
+                    pending_load_path_       = load_path;
+                    is_loading_show          = true;
+                    pending_orphan_recovery_.clear();
+                    s_cr_opened = false;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Discard", ImVec2(120, 0))) {
+                    std::error_code ec;
+                    std::filesystem::remove(pending_orphan_recovery_, ec);
+                    pending_orphan_recovery_.clear();
+                    s_cr_opened = false;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            } else if (s_cr_opened && pending_orphan_recovery_.empty()) {
+                s_cr_opened = false;  // popup was dismissed externally (e.g. Escape)
+            }
         }
 
         if (!show_startup_dialog) {
@@ -4282,6 +4883,12 @@ void Application::Impl::shutdown() {
         mgr->stop();
     laser_managers_.clear();
 
+    // Stop InputRouter before engine (it pushes DMX into the engine queue)
+    if (input_router_) {
+        log::info("input_router: stopping");
+        input_router_->stop();
+        input_router_.reset();
+    }
     if (watchdog) { watchdog->stop(); watchdog.reset(); }
     if (engine)   { log::info("engine: stopping"); engine->stop(); engine.reset(); }
     log::info("audio: shutting down");

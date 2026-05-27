@@ -5,6 +5,7 @@
 
 #include <readerwriterqueue.h>
 #include <concurrentqueue.h>
+#include <chrono>
 #include <optional>
 #include <cstddef>
 
@@ -19,6 +20,35 @@ public:
     // Producer side (single thread only)
     bool try_push(const T& item) { return q_.try_enqueue(item); }
     bool try_push(T&& item)      { return q_.try_enqueue(std::move(item)); }
+
+    // L-1: the original push() busy-spun forever on a full queue.  On the real-
+    // time engine thread that is a priority-inversion deadlock if the consumer
+    // stalls: the high-priority engine spins, starving the consumer which would
+    // drain the queue.  push_timeout() spins for at most timeout_us microseconds
+    // and returns false on expiry so the caller can drop or log and continue.
+    bool push_timeout(const T& item,
+                      std::chrono::microseconds timeout_us = std::chrono::microseconds{500})
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout_us;
+        while (!q_.try_enqueue(item)) {
+            if (std::chrono::steady_clock::now() >= deadline)
+                return false;
+        }
+        return true;
+    }
+    bool push_timeout(T&& item,
+                      std::chrono::microseconds timeout_us = std::chrono::microseconds{500})
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout_us;
+        while (!q_.try_enqueue(std::move(item))) {
+            if (std::chrono::steady_clock::now() >= deadline)
+                return false;
+        }
+        return true;
+    }
+
+    // Legacy blocking push — kept for callers not on the RT thread.
+    // Do NOT use on the engine thread; use push_timeout() there.
     void push(const T& item)     { while (!q_.try_enqueue(item)) {} }
     void push(T&& item)          { while (!q_.try_enqueue(std::move(item))) {} }
 

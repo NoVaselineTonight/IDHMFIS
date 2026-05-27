@@ -252,8 +252,8 @@ struct FrameEditorState {
         };
         FuncType func = FuncType::Linear;
 
-        float param_a = 0.f;  // slope=0 → flat horizontal line of objects
-        float param_b = 0.f;
+        float param_a = 1.f;  // amplitude/slope; 1 gives a visible shape by default
+        float param_b = 1.f;  // frequency/coefficient; 0 makes Sine/Cosine degenerate
         float param_c = 0.f;
         float param_d = 0.f;
         float lissajous_a     = 3.f;
@@ -434,6 +434,8 @@ struct LayoutCallbacks {
     std::function<void(const NdiConfig&)>            on_setup_ndi_config;
     std::function<void(int osc_port)>                on_setup_osc_port;
     std::function<void(float, float, float)>         on_setup_beam_params; // thickness, glow_r, glow_alpha
+    // Laser output quality — carries the full OptimizerConfig + point rate
+    std::function<void(const UIState::OutputConfig&)> on_setup_laser_quality;
 
     // Playback fader callbacks (added at end to avoid breaking other agents' edits)
     std::function<void(int pb_id)>                         on_playback_go;
@@ -511,6 +513,11 @@ struct LayoutCallbacks {
     // Explicit programmer clear — ChamSys rule: only this callback (wired to
     // cmd::ClearProgrammer) may wipe per-stream programmer content.
     std::function<void()> on_clear_programmer;
+
+    // Re-initialize all output streams: stops every DacManager and schedules a
+    // full rebuild.  Triggered by the Reinit button in the STREAMS window.
+    // Use when streams appear stuck or not initialized after loading a show.
+    std::function<void()> on_reinit_streams;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -619,6 +626,11 @@ struct LayoutContext {
 
     // Set to false whenever we enter Show view to force one-time layout reset
     bool show_layout_initialised = false;
+
+    // Dock node ID for the Timeline Editor slot — stored at layout-init time so
+    // the editor window can be re-docked to the correct node when reopened after
+    // the user closes it (empty dock nodes are pruned by ImGui).
+    ImGuiID tl_editor_dock_node_id = 0;
 
     // PBCONF popup — which playback id has its config popup open (-1 = none)
     int pbconf_open_id = -1;

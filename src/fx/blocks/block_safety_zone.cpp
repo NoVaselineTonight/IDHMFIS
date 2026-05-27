@@ -9,7 +9,7 @@ static constexpr float kInv   = 1.f / kScale;
 BlockSafetyZone::BlockSafetyZone() {
     p_cx_     = { "cx",     0.f, 0.f, -1.f, 1.f,  0.01f, "" };
     p_cy_     = { "cy",     0.f, 0.f, -1.f, 1.f,  0.01f, "" };
-    p_radius_ = { "radius", 0.1f, 0.1f, 0.f, 2.f, 0.01f, "" };
+    p_radius_ = { "radius", 0.1f, 0.f, 0.f, 2.f, 0.01f, "" };
 }
 
 std::vector<FxParam*> BlockSafetyZone::params() {

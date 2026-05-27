@@ -698,6 +698,24 @@ void panel_patch(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
         ImGui::PopStyleColor(3);
         ImGui::SetItemTooltip("Add multiple outputs of the same type at once.");
 
+        // REINIT STREAMS — amber; stops and restarts every DacManager.
+        // Placed here (OUTPUTS page) so it is visible whenever streams are
+        // visible and accessible without switching to a different view.
+        ImGui::SameLine(0, 8.0f);
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.22f, 0.13f, 0.02f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.58f, 0.34f, 0.06f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.16f, 0.09f, 0.02f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f,  0.72f, 0.15f, 1.0f));
+        if (ImGui::Button("REINIT##ppreinit")) {
+            if (cbs.on_reinit_streams) cbs.on_reinit_streams();
+        }
+        ImGui::PopStyleColor(4);
+        ImGui::SetItemTooltip(
+            "Re-initialize all output streams.\n"
+            "Stops every DAC manager and restarts them from scratch.\n"
+            "Use when streams are not sending after loading a show,\n"
+            "or when Capture 2024 / DAC hardware loses its connection.");
+
         // Column header underline in accent color
         {
             ImVec2 p0 = ImGui::GetCursorScreenPos();
@@ -728,12 +746,18 @@ void panel_patch(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
             if (ImGui::Checkbox("Broadcast to all##bcast", &bcast)) {
                 state.broadcast_to_all = bcast;
                 if (bcast) {
-                    // Broadcast mode: clear selection filter — engine uses empty = all
+                    // Broadcast mode: send all enabled laser IDs so the engine runs
+                    // the programmer for every output.  Sending an empty set would
+                    // disable the programmer entirely (empty = no filter = cue-only).
                     state.selected_output_ids.clear();
-                    std::vector<int> old_ids_bcast = state.active_stream_ids;
-                    state.active_stream_ids.clear();
                     for (auto& po2 : state.patched_outputs)
                         po2.selected_for_programming = false;
+                    std::vector<int> all_ids;
+                    for (const auto& po : state.patched_outputs)
+                        if (po.type == OutputStreamType::Laser && po.config.enabled)
+                            all_ids.push_back(po.id);
+                    std::vector<int> old_ids_bcast = state.active_stream_ids;
+                    state.active_stream_ids = all_ids;
                     if (cbs.on_active_streams_changed)
                         cbs.on_active_streams_changed(old_ids_bcast, state.active_stream_ids);
                 }
@@ -969,20 +993,6 @@ void panel_patch(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
-
-    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f, 0.50f, 0.15f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.65f, 0.22f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.10f, 0.38f, 0.10f, 1.0f));
-    if (ImGui::Button("Apply Outputs", ImVec2(120.0f, 0.0f))) {
-        if (cbs.on_output_patch_changed)
-            cbs.on_output_patch_changed(collect_configs(state));
-    }
-    ImGui::PopStyleColor(3);
-    ImGui::SetItemTooltip(
-        "Push the current patch configuration to the engine.\n"
-        "Changes are also sent automatically when any property is edited.");
-
-    ImGui::SameLine(0, 16.0f);
 
     // Output count summary
     {

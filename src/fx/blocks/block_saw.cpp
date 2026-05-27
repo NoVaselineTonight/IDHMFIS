@@ -31,6 +31,8 @@ const std::vector<FxParam*> BlockSaw::params() const {
 void BlockSaw::process(PointBuffer& buf, float dt, const ExprContext& /*ctx*/) {
     const float speed = p_speed_.effective();
     anim_phase_ += speed * static_cast<float>(2.0 * M_PI) * dt;
+    // Wrap to preserve float precision over long shows
+    anim_phase_ = std::fmod(anim_phase_, static_cast<float>(2.0 * M_PI));
 
     const int   axis      = static_cast<int>(p_axis_.effective() + 0.5f);
     const float amplitude = p_amplitude_.effective();

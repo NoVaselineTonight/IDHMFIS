@@ -366,7 +366,7 @@ void TransportBar(bool*       playing,
     // --- BPM display ----------------------------------------------------------
     ImGui::PushItemWidth(70.f);
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertFloat4ToU32(theme::accent()));
-    ImGui::DragFloat("##BPM", bpm, 0.5f, 20.f, 300.f, "%.1f BPM");
+    ImGui::DragFloat("##BPM", bpm, 0.5f, 20.f, 2000.f, "%.1f BPM");
     ImGui::PopStyleColor();
     ImGui::PopItemWidth();
 
@@ -553,7 +553,8 @@ double TimelineRuler(const char* id,
                      float  width,
                      float  height,
                      float  pixels_per_second,
-                     float  bpm)
+                     float  bpm,
+                     float* scroll_x_ptr)
 {
     double new_playhead = -1.0;
     ImGui::PushID(id);
@@ -563,34 +564,43 @@ double TimelineRuler(const char* id,
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
+    float sx = scroll_x_ptr ? *scroll_x_ptr : 0.f;
+
     // Background
     dl->AddRectFilled(pos, ImVec2(pos.x + width, pos.y + height),
                       ImGui::ColorConvertFloat4ToU32(theme::background()));
 
-    float seconds_beat = 60.f / bpm;
+    // Guard against degenerate bpm/zoom
+    double pps = (pixels_per_second > 0.01f) ? (double)pixels_per_second : 0.01;
+    float  beat_s   = (bpm > 0.1f) ? 60.f / bpm : 2.f;
+    float  beat_px  = beat_s * (float)pps;
 
-    // Tick marks
-    // Choose subdivision: quarter note, bar (4 beats), etc.
-    float beat_px = seconds_beat * pixels_per_second;
+    // Start ticks at the first beat visible (skip off-screen left ticks)
+    float  x_start  = pos.x;
+    float  x_end    = pos.x + width;
+    double t_start  = std::max(0.0, (double)sx / pps);
+    // round down to the nearest beat
+    double t_first  = std::floor(t_start / (double)beat_s) * (double)beat_s;
 
-    // Draw bars and beats
-    double start_s = 0.0;
-    float  x_end   = pos.x + width;
+    int tick_limit = 4000;
+    int tick_count = 0;
+    for (double t = t_first; t <= total_s + (double)beat_s && tick_count < tick_limit;
+         t += (double)beat_s, ++tick_count)
+    {
+        float x = pos.x + (float)(t * pps) - sx;
+        if (x < x_start - 2.f) continue;
+        if (x > x_end + 2.f)   break;
 
-    for (double t = start_s; t <= total_s; t += seconds_beat) {
-        float x = pos.x + (float)(t * pixels_per_second);
-        if (x > x_end) break;
-
-        bool is_bar = std::fmod(t, (double)(seconds_beat * 4.f)) < 0.001;
-        float tick_h = is_bar ? height * 0.7f : height * 0.35f;
-        ImU32 tick_col = is_bar ? col32(0x4A5577) : col32(0x2A3044);
+        bool  is_bar  = std::fmod(t, (double)(beat_s * 4.f)) < (double)beat_s * 0.01;
+        float tick_h  = is_bar ? height * 0.70f : height * 0.35f;
+        ImU32 tick_col= is_bar ? col32(0x4A5577) : col32(0x2A3044);
         dl->AddLine(ImVec2(x, pos.y + height - tick_h),
                     ImVec2(x, pos.y + height),
                     tick_col);
 
-        if (is_bar && beat_px > 30.f) {
+        if (is_bar && beat_px > 24.f) {
             char bar_label[8];
-            int bar_num = (int)(t / (seconds_beat * 4.f)) + 1;
+            int bar_num = (int)(t / ((double)beat_s * 4.0)) + 1;
             std::snprintf(bar_label, sizeof(bar_label), "%d", bar_num);
             dl->AddText(ImVec2(x + 2.f, pos.y + 2.f),
                         col32(0x7B8499), bar_label);
@@ -601,24 +611,46 @@ double TimelineRuler(const char* id,
     dl->AddRect(pos, ImVec2(pos.x + width, pos.y + height),
                 ImGui::ColorConvertFloat4ToU32(theme::border_color()));
 
-    // Playhead
-    float ph_x = pos.x + (float)(playhead_s * pixels_per_second);
-    if (ph_x >= pos.x && ph_x <= pos.x + width) {
+    // Playhead indicator
+    float ph_x = pos.x + (float)(playhead_s * pps) - sx;
+    if (ph_x >= x_start && ph_x <= x_end) {
         dl->AddLine(ImVec2(ph_x, pos.y), ImVec2(ph_x, pos.y + height),
                     ImGui::ColorConvertFloat4ToU32(theme::accent()), 2.f);
-        // Arrow head
         dl->AddTriangleFilled(
             ImVec2(ph_x - 5.f, pos.y),
             ImVec2(ph_x + 5.f, pos.y),
-            ImVec2(ph_x, pos.y + 8.f),
+            ImVec2(ph_x,       pos.y + 8.f),
             ImGui::ColorConvertFloat4ToU32(theme::accent()));
     }
 
-    // Click to seek
-    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-        float mx = ImGui::GetMousePos().x;
-        double t = (mx - pos.x) / pixels_per_second;
-        new_playhead = std::clamp(t, 0.0, total_s);
+    // Drag-to-pan (left mouse) + click-to-seek
+    // We distinguish: if the mouse moved >= 4 px it's a pan; otherwise it's a seek.
+    static bool s_ruler_panning = false;
+    if (ImGui::IsItemActive()) {
+        ImVec2 delta = ImGui::GetIO().MouseDelta;
+        if (scroll_x_ptr && (s_ruler_panning || std::abs(delta.x) > 0.5f)) {
+            s_ruler_panning = true;
+            *scroll_x_ptr -= delta.x;
+            if (*scroll_x_ptr < 0.f) *scroll_x_ptr = 0.f;
+        }
+    }
+    if (ImGui::IsItemDeactivated()) {
+        if (!s_ruler_panning) {
+            // Pure click — seek
+            float mx = ImGui::GetMousePos().x;
+            double t = ((double)(mx - pos.x) + (double)sx) / pps;
+            new_playhead = std::clamp(t, 0.0, total_s);
+        }
+        s_ruler_panning = false;
+    }
+
+    // Mouse-wheel over ruler also scrolls horizontally
+    if (scroll_x_ptr && ImGui::IsItemHovered()) {
+        float wheel = ImGui::GetIO().MouseWheel;
+        if (wheel != 0.f) {
+            *scroll_x_ptr -= wheel * 80.f;
+            if (*scroll_x_ptr < 0.f) *scroll_x_ptr = 0.f;
+        }
     }
 
     ImGui::PopID();

@@ -30,6 +30,7 @@ const std::vector<FxParam*> BlockPendulum::params() const {
 
 void BlockPendulum::process(PointBuffer& buf, float dt, const ExprContext& /*ctx*/) {
     anim_t_ += dt;
+    if (anim_t_ > 65536.f) anim_t_ -= 65536.f;
 
     const float ax    = p_amplitude_x_.effective();
     const float ay    = p_amplitude_y_.effective();

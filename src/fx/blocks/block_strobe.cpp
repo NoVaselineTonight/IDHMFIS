@@ -62,9 +62,11 @@ void BlockStrobe::process(PointBuffer& buf, float dt, const ExprContext& ctx) {
             pt.g = 0;
             pt.b = 0;
         } else {
-            pt.r = static_cast<uint8_t>(static_cast<float>(pt.r) * level);
-            pt.g = static_cast<uint8_t>(static_cast<float>(pt.g) * level);
-            pt.b = static_cast<uint8_t>(static_cast<float>(pt.b) * level);
+            // L-11: clamp to [0, 255] before casting — modulation can push level > 1.0,
+            // making the product exceed 255 and wrap to a wrong uint8_t value.
+            pt.r = static_cast<uint8_t>(std::clamp(static_cast<float>(pt.r) * level, 0.f, 255.f));
+            pt.g = static_cast<uint8_t>(std::clamp(static_cast<float>(pt.g) * level, 0.f, 255.f));
+            pt.b = static_cast<uint8_t>(std::clamp(static_cast<float>(pt.b) * level, 0.f, 255.f));
         }
     }
 }

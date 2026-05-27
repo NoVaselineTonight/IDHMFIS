@@ -62,14 +62,16 @@ public:
             float local_s       = theta - base_angle_s;
             float perp_cos_s    = std::cos(half_seg_src);
             // polygon radius at this angle: r/cos(local - half_seg)
-            float r_src         = perp_cos_s / std::cos(local_s - half_seg_src);
+            float cos_val_s = std::cos(local_s - half_seg_src);
+            float r_src = (std::fabs(cos_val_s) > 1e-6f) ? perp_cos_s / cos_val_s : perp_cos_s / 1e-6f;
 
             float seg_dst = kTwoPi / n_dst;
             float half_seg_dst  = seg_dst / 2.f;
             float base_angle_d  = std::floor(theta / seg_dst) * seg_dst;
             float local_d       = theta - base_angle_d;
             float perp_cos_d    = std::cos(half_seg_dst);
-            float r_dst         = perp_cos_d / std::cos(local_d - half_seg_dst);
+            float cos_val_d = std::cos(local_d - half_seg_dst);
+            float r_dst = (std::fabs(cos_val_d) > 1e-6f) ? perp_cos_d / cos_val_d : perp_cos_d / 1e-6f;
 
             float r = scale * ((1.f - morph) * r_src + morph * r_dst);
             r = std::clamp(r, 0.f, 2.f);

@@ -23,26 +23,85 @@
 namespace idhmfis {
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Timing display helper — "Xs / YY.Y BPM" dual format
+//  Timing display helper — format aware (Seconds / BPM / MM:SS.ms)
 // ─────────────────────────────────────────────────────────────────────────────
 static bool DragTimingFloat(const char* label, float* v, float speed,
-                             float min_v, float max_v, float bpm = 0.f)
+                             float min_v, float max_v, float bpm = 0.f,
+                             UIState::TimingDisplayMode disp = UIState::TimingDisplayMode::Seconds)
 {
-    bool changed = ImGui::DragFloat(label, v, speed, min_v, max_v, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
+    using TDM = UIState::TimingDisplayMode;
+
+    // Build a display string from the current value in the chosen format so the
+    // drag widget shows it; the underlying storage is always in seconds.
+    // Bug 27: always snprintf so fmt_buf holds a real number, not the literal format string.
+    char fmt_buf[48];
+    std::snprintf(fmt_buf, sizeof(fmt_buf), "%.2f s", *v);
+    if (disp == TDM::BPM) {
+        // MM:SS + current BPM — shows both the absolute time in minutes/seconds
+        // and the project tempo so the operator sees both at a glance.
+        int total_ms2  = static_cast<int>(*v * 1000.f + 0.5f);
+        int total_sec2 = total_ms2 / 1000;
+        int secs2      = total_sec2 % 60;
+        int mins2      = total_sec2 / 60;
+        if (bpm > 0.f)
+            std::snprintf(fmt_buf, sizeof(fmt_buf), "%02d:%02d  %.0f BPM", mins2, secs2, static_cast<double>(bpm));
+        else
+            std::snprintf(fmt_buf, sizeof(fmt_buf), "%02d:%02d", mins2, secs2);
+    } else if (disp == TDM::MMSSMS) {
+        int total_ms  = static_cast<int>(*v * 1000.f + 0.5f);
+        int ms        = total_ms % 1000;
+        int total_sec = total_ms / 1000;
+        int secs      = total_sec % 60;
+        int mins      = total_sec / 60;
+        std::snprintf(fmt_buf, sizeof(fmt_buf), "%02d:%02d.%03d", mins, secs, ms);
+    }
+    // DragFloat always stores seconds; fmt_buf only controls display text.
+    // Because DragFloat can't use a pre-formatted string we use it in overlay mode:
+    // drag invisibly, then draw the formatted value on top.
+    // Use " " (single space) for non-seconds modes so DragFloat renders no text of its own —
+    // we then draw our fully-formatted string as an overlay. Using "%.2f" would cause both
+    // the raw float AND the formatted string to appear simultaneously (mangled text).
+    bool changed = ImGui::DragFloat(label, v, speed, min_v, max_v,
+                                    (disp == TDM::Seconds) ? "%.2f s" : " ",
+                                    ImGuiSliderFlags_AlwaysClamp);
+
+    // Overlay formatted text when using non-seconds modes, clipped to the widget rect
+    if (disp != TDM::Seconds) {
+        ImVec2 item_min = ImGui::GetItemRectMin();
+        ImVec2 item_max = ImGui::GetItemRectMax();
+        ImVec2 text_sz  = ImGui::CalcTextSize(fmt_buf);
+        float  tx = item_min.x + (item_max.x - item_min.x - text_sz.x) * 0.5f;
+        float  ty = item_min.y + (item_max.y - item_min.y - text_sz.y) * 0.5f;
+        tx = std::max(tx, item_min.x + 2.f);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->PushClipRect(item_min, item_max, true);
+        dl->AddText(ImVec2(tx, ty), ImGui::GetColorU32(ImGuiCol_Text), fmt_buf);
+        dl->PopClipRect();
+    }
+
+    // Tooltip: always shows all three formats for quick reference
     if (ImGui::IsItemHovered() && *v > 0.001f) {
         float equiv_bpm = 60.f / *v;
+        int total_ms  = static_cast<int>(*v * 1000.f + 0.5f);
+        int ms        = total_ms % 1000;
+        int total_sec = total_ms / 1000;
+        int secs      = total_sec % 60;
+        int mins      = total_sec / 60;
+        char mmss[24];
+        std::snprintf(mmss, sizeof(mmss), "%02d:%02d.%03d", mins, secs, ms);
         if (bpm > 0.f) {
             float beats = (*v) * bpm / 60.f;
-            ImGui::SetTooltip("%.2f s  |  %.1f BPM equiv  |  %.2f beats @%.0f BPM", *v, equiv_bpm, beats, bpm);
+            ImGui::SetTooltip("%.3f s  |  %s  |  %.3f beats @%.0f BPM  |  %.1f BPM equiv",
+                              *v, mmss, beats, bpm, equiv_bpm);
         } else {
-            ImGui::SetTooltip("%.2f s  (%.1f BPM equiv)", *v, equiv_bpm);
+            ImGui::SetTooltip("%.3f s  |  %s  |  %.1f BPM equiv", *v, mmss, equiv_bpm);
         }
     }
-    // Show beat count as secondary dim text when BPM is known and value is non-trivial
-    if (bpm > 0.f && *v > 0.001f) {
+    // Secondary dim annotation next to the drag widget (only in Seconds mode to avoid clutter)
+    if (disp == TDM::Seconds && bpm > 0.f && *v > 0.001f) {
         float beats = (*v) * bpm / 60.f;
         char bpm_buf[24];
-        std::snprintf(bpm_buf, sizeof(bpm_buf), "%.2f bt", beats);
+        std::snprintf(bpm_buf, sizeof(bpm_buf), "%.2f beats", beats);
         ImGui::SameLine(0.f, 4.f);
         ImGui::TextDisabled("%s", bpm_buf);
     }
@@ -144,7 +203,7 @@ static constexpr const char* kWinCueLib      = "Cue Library##w";
 static constexpr const char* kWinPreview     = "Laser Preview##w";
 static constexpr const char* kWinStreams     = "STREAMS##streams_win";
 static constexpr const char* kWinInspector   = "Inspector##w";
-static constexpr const char* kWinTimeline    = "Timeline##w";
+static constexpr const char* kWinTimeline    = "Cuelist##w";
 static constexpr const char* kWinFrameEditor = "Frame Editor##w";
 static constexpr const char* kWinMacros      = "Macros##w";
 static constexpr const char* kWinZones       = "Zones##w";
@@ -259,16 +318,16 @@ void layout_draw(UIState&          state,
     // Row 1 — Main Menu Bar (~20px, managed entirely by ImGui)
     // =========================================================================
     if (ImGui::BeginMainMenuBar()) {
-        if (ImGui::BeginMenu("File")) {
-            // Pending action for unsaved-changes confirmation
-            static enum class PendingFileAction { None, New, Open } s_pending_action
-                = PendingFileAction::None;
+        static enum class PendingFileAction { None, New, Open } s_pending_action
+            = PendingFileAction::None;
+        static bool s_open_unsaved_fc = false;
 
+        if (ImGui::BeginMenu("File")) {
             // New Show
             if (ImGui::MenuItem("New Show", "Ctrl+N")) {
                 if (state.project_dirty) {
                     s_pending_action = PendingFileAction::New;
-                    ImGui::OpenPopup("Unsaved Changes##fc");
+                    s_open_unsaved_fc = true;
                 } else {
                     if (cbs.on_new_project) cbs.on_new_project();
                 }
@@ -277,31 +336,10 @@ void layout_draw(UIState&          state,
             if (ImGui::MenuItem("Open...", "Ctrl+O")) {
                 if (state.project_dirty) {
                     s_pending_action = PendingFileAction::Open;
-                    ImGui::OpenPopup("Unsaved Changes##fc");
+                    s_open_unsaved_fc = true;
                 } else {
                     if (cbs.on_open_project) cbs.on_open_project();
                 }
-            }
-
-            // Unsaved changes confirmation popup
-            if (ImGui::BeginPopupModal("Unsaved Changes##fc", nullptr,
-                                       ImGuiWindowFlags_AlwaysAutoResize)) {
-                ImGui::Text("You have unsaved changes. Continue without saving?");
-                ImGui::Spacing();
-                if (ImGui::Button("Continue", ImVec2(100, 0))) {
-                    if (s_pending_action == PendingFileAction::New  && cbs.on_new_project)
-                        cbs.on_new_project();
-                    if (s_pending_action == PendingFileAction::Open && cbs.on_open_project)
-                        cbs.on_open_project();
-                    s_pending_action = PendingFileAction::None;
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Cancel", ImVec2(100, 0))) {
-                    s_pending_action = PendingFileAction::None;
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::EndPopup();
             }
 
             ImGui::Separator();
@@ -331,6 +369,29 @@ void layout_draw(UIState&          state,
             if (ImGui::MenuItem("Quit", "Alt+F4")) { ctx.quit_requested = true; }
             ImGui::EndMenu();
         }
+        if (s_open_unsaved_fc) {
+            ImGui::OpenPopup("Unsaved Changes##fc");
+            s_open_unsaved_fc = false;
+        }
+        if (ImGui::BeginPopupModal("Unsaved Changes##fc", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("You have unsaved changes. Continue without saving?");
+            ImGui::Spacing();
+            if (ImGui::Button("Continue", ImVec2(100, 0))) {
+                if (s_pending_action == PendingFileAction::New  && cbs.on_new_project)
+                    cbs.on_new_project();
+                if (s_pending_action == PendingFileAction::Open && cbs.on_open_project)
+                    cbs.on_open_project();
+                s_pending_action = PendingFileAction::None;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+                s_pending_action = PendingFileAction::None;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
         if (ImGui::BeginMenu("Edit")) {
             if (ImGui::MenuItem("Undo",         "Ctrl+Z"))     if (cbs.on_undo)  cbs.on_undo();
             if (ImGui::MenuItem("Redo",         "Ctrl+Shift+Z")) if (cbs.on_redo) cbs.on_redo();
@@ -359,6 +420,7 @@ void layout_draw(UIState&          state,
             ImGui::MenuItem("3D Preview##wm",      nullptr, &ctx.panel_3d_open);
             ImGui::MenuItem("Frame Editor##wm",    nullptr, &ctx.frame_editor_open);
             ImGui::MenuItem("BPM##wm",             nullptr, &ctx.bpm_open);
+            ImGui::MenuItem("Timeline Editor##wm", nullptr, &ctx.timeline_view_open);
             ImGui::MenuItem("Timelines##wm",       nullptr, &ctx.panel_timeline_open);
             ImGui::MenuItem("Cue Library##wm",     nullptr, &ctx.panel_cue_lib_open);
             ImGui::MenuItem("STREAMS##wm",         nullptr, &ctx.streams_window_open);
@@ -569,6 +631,7 @@ void layout_draw(UIState&          state,
             ImGui::DockBuilderSplitNode(dock_previews, ImGuiDir_Down, 0.45f,
                                         &dock_3d, &dock_2d);
 
+            ctx.tl_editor_dock_node_id = dock_tl_editor;
             ImGui::DockBuilderDockWindow("Playbacks##show_view_grid", dock_playbacks);
             ImGui::DockBuilderDockWindow("Timeline Editor##tlv",      dock_tl_editor);
             ImGui::DockBuilderDockWindow("Timelines##tl_list",        dock_timelines);
@@ -589,9 +652,9 @@ void layout_draw(UIState&          state,
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.f, 6.f));
             if (ImGui::Begin("BPM##bpm_float", &ctx.bpm_open, bpm_flags)) {
                 ImGui::SetNextItemWidth(110.f);
-                ImGui::DragFloat("##bpm_w", &state.bpm, 0.5f, 20.f, 999.f, "%.1f BPM");
+                ImGui::DragFloat("##bpm_w", &state.bpm, 0.5f, 20.f, 2000.f, "%.1f BPM");
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("BPM — drag to adjust, Ctrl+click to type\nRange: 20–999 BPM");
+                    ImGui::SetTooltip("BPM — drag to adjust, Ctrl+click to type\nRange: 20–2000 BPM");
                 {
                     static float s_prev_bpm_w = 120.f;
                     if (std::fabs(state.bpm - s_prev_bpm_w) > 0.05f) {
@@ -1086,6 +1149,7 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
                     if (!feed.objects.empty()) {
                         KeyframeLayer kf;
                         kf.objects = feed.objects;
+                        kf.symmetry_mode = static_cast<int>(ctx.frame_editor.symmetry);
                         fce.per_stream_kf[sid] = kf;
                     }
                 }
@@ -1113,6 +1177,7 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
                     if (!feed.objects.empty()) {
                         KeyframeLayer kf;
                         kf.objects = feed.objects;
+                        kf.symmetry_mode = static_cast<int>(ctx.frame_editor.symmetry);
                         fce.per_stream_kf[sid] = kf;
                     }
                 }
@@ -1152,6 +1217,76 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
             ImGui::SetTooltip(mov
                 ? "MOVE mode ON — drag output cells in STREAMS to reorder. Click to exit."
                 : "MOVE: drag-and-drop outputs in STREAMS grid to match physical rig layout");
+    }
+
+    // ── NAME ─────────────────────────────────────────────────────────────────
+    // Names the current context target — included cue, included playback, or
+    // the playback whose cue stack is currently open.  Always clickable.
+    {
+        static bool s_name_modal_open = false;
+        static char s_name_buf[128]   = {};
+        // Priority: included main cue > included PB > PB in cue-stack view
+        const bool has_cue    = (ctx.included_cue_idx >= 0);
+        const bool has_pb_inc = (ctx.included_pb_id >= 0);
+        const bool has_pb_view= (state.pb_cuelist_pb_id >= 0);
+        // NAME is always enabled — when nothing is in context we open with an empty label
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.12f, 0.20f, 0.35f, 1.f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.30f, 0.52f, 1.f));
+        if (ImGui::Button("NAME##sb", ImVec2(item_w, 34.f))) {
+            std::string cur;
+            if (has_cue && ctx.included_cue_idx < (int)state.full_cue_list.size())
+                cur = state.full_cue_list[ctx.included_cue_idx].name;
+            else if (has_pb_inc) {
+                // Find playback name from snapshot
+                for (int pi = 0; pi < state.snap.playback_count; ++pi)
+                    if (state.snap.playbacks[pi].id == ctx.included_pb_id)
+                        { cur = state.snap.playbacks[pi].name; break; }
+            } else if (has_pb_view) {
+                for (int pi = 0; pi < state.snap.playback_count; ++pi)
+                    if (state.snap.playbacks[pi].id == state.pb_cuelist_pb_id)
+                        { cur = state.snap.playbacks[pi].name; break; }
+            }
+            std::strncpy(s_name_buf, cur.c_str(), sizeof(s_name_buf) - 1);
+            s_name_buf[sizeof(s_name_buf) - 1] = '\0';
+            s_name_modal_open = true;
+            ImGui::OpenPopup("Rename##name_modal");
+        }
+        ImGui::PopStyleColor(2);
+        const char* name_tip = has_cue    ? "NAME: rename the included cue"
+                             : has_pb_inc ? "NAME: rename the included playback"
+                             : has_pb_view? "NAME: rename the open playback"
+                             :              "NAME: include a cue or open a playback first";
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", name_tip);
+
+        ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        if (ImGui::BeginPopupModal("Rename##name_modal", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            const char* modal_label = has_cue    ? "Cue name:"
+                                    : has_pb_inc || has_pb_view ? "Playback name:" : "Name:";
+            ImGui::TextUnformatted(modal_label);
+            ImGui::SetNextItemWidth(260.f);
+            bool confirm = ImGui::InputText("##name_input", s_name_buf, sizeof(s_name_buf),
+                                            ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::SetItemDefaultFocus();
+            if (confirm || ImGui::Button("OK##name_ok", ImVec2(124.f, 0.f))) {
+                if (has_cue && cbs.on_rename_cue)
+                    cbs.on_rename_cue(ctx.included_cue_idx, std::string(s_name_buf));
+                else if (has_pb_inc && cbs.on_playback_rename)
+                    cbs.on_playback_rename(ctx.included_pb_id, std::string(s_name_buf));
+                else if (has_pb_view && cbs.on_playback_rename)
+                    cbs.on_playback_rename(state.pb_cuelist_pb_id, std::string(s_name_buf));
+                s_name_modal_open = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel##name_cancel", ImVec2(124.f, 0.f))) {
+                s_name_modal_open = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        (void)s_name_modal_open;
     }
 
     ImGui::PopStyleVar(2);
@@ -2736,12 +2871,12 @@ void panel_inspector(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                         bool dirty = false;
 
                         dirty |= DragTimingFloat("Hold##ch_hold",
-                            &edited.chaser_global_hold, 0.01f, 0.01f, 10.f, state.bpm);
+                            &edited.chaser_global_hold, 0.01f, 0.01f, 10.f, state.bpm, state.timing_display_mode);
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("Default hold time per step in seconds");
 
                         dirty |= DragTimingFloat("Crossfade##ch_xfade",
-                            &edited.chaser_global_xfade, 0.01f, 0.f, 2.f, state.bpm);
+                            &edited.chaser_global_xfade, 0.01f, 0.f, 2.f, state.bpm, state.timing_display_mode);
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("Default crossfade duration between steps");
 
@@ -2818,7 +2953,7 @@ void panel_inspector(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                                 // Hold override column
                                 ImGui::TableSetColumnIndex(2);
                                 ImGui::PushItemWidth(-1.f);
-                                if (DragTimingFloat("##sc_hold", &step.hold_s, 0.01f, -1.f, 10.f, state.bpm)) {
+                                if (DragTimingFloat("##sc_hold", &step.hold_s, 0.01f, -1.f, 10.f, state.bpm, state.timing_display_mode)) {
                                     dirty = true;
                                 }
                                 if (ImGui::IsItemHovered())
@@ -2971,7 +3106,7 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
         static float s_set_all_val  = 0.f;
         static bool  s_set_all_open = false;
 
-        if (ImGui::BeginTable("##cstable", 8, tflags)) {
+        if (ImGui::BeginTable("##cstable", 8, tflags, ImVec2(0.f, ImGui::GetContentRegionAvail().y))) {
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableSetupColumn("#",        ImGuiTableColumnFlags_WidthFixed,   28.f);
             ImGui::TableSetupColumn("Name",     ImGuiTableColumnFlags_WidthStretch, 3.f);
@@ -3004,7 +3139,7 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                     ImGui::Text("Set ALL cues — %s", col_names[s_set_all_col]);
                     ImGui::Spacing();
                     ImGui::SetNextItemWidth(160.f);
-                    DragTimingFloat("##sa_val", &s_set_all_val, 0.01f, 0.f, 600.f, state.bpm);
+                    DragTimingFloat("##sa_val", &s_set_all_val, 0.01f, 0.f, 600.f, state.bpm, state.timing_display_mode);
                     ImGui::Spacing();
                     if (ImGui::Button("Apply##sa_apply", ImVec2(100.f, 0.f))) {
                         // Apply value to all cues and send updates
@@ -3100,22 +3235,22 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                 FullCueEntry edited = fce;
                 bool dirty = false;
                 ImGui::SetNextItemWidth(-1.f);
-                if (DragTimingFloat("##fi",   &edited.timing.fade_in,  0.01f, 0.f,   60.f, state.bpm)) dirty = true;
+                if (DragTimingFloat("##fi",   &edited.timing.fade_in,  0.01f, 0.f,   60.f, state.bpm, state.timing_display_mode)) dirty = true;
 
                 // Col 3: Hold
                 ImGui::TableSetColumnIndex(3);
                 ImGui::SetNextItemWidth(-1.f);
-                if (DragTimingFloat("##hld",  &edited.timing.hold,     0.01f, 0.f,  600.f, state.bpm)) dirty = true;
+                if (DragTimingFloat("##hld",  &edited.timing.hold,     0.01f, 0.f,  600.f, state.bpm, state.timing_display_mode)) dirty = true;
 
                 // Col 4: Fade Out
                 ImGui::TableSetColumnIndex(4);
                 ImGui::SetNextItemWidth(-1.f);
-                if (DragTimingFloat("##fo",   &edited.timing.fade_out,  0.01f, 0.f,  60.f, state.bpm)) dirty = true;
+                if (DragTimingFloat("##fo",   &edited.timing.fade_out,  0.01f, 0.f,  60.f, state.bpm, state.timing_display_mode)) dirty = true;
 
                 // Col 5: Wait (auto-advance)
                 ImGui::TableSetColumnIndex(5);
                 ImGui::SetNextItemWidth(-1.f);
-                if (DragTimingFloat("##wait", &edited.timing.wait,      0.01f, 0.f, 600.f, state.bpm)) dirty = true;
+                if (DragTimingFloat("##wait", &edited.timing.wait,      0.01f, 0.f, 600.f, state.bpm, state.timing_display_mode)) dirty = true;
 
                 if (dirty && cbs.on_playback_cue_update)
                     cbs.on_playback_cue_update(pb_id, ci, edited);
@@ -3195,6 +3330,7 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                 ImGui::SameLine(0, 4);
                 ImGui::PushItemWidth(100.f);
                 ImGui::SliderFloat("##zoom", &ctx.timeline_zoom, 10.f, 300.f, "%.0f px/s");
+                ctx.timeline_zoom = std::max(ctx.timeline_zoom, 1.f);  // guard: mouse-wheel cannot take zoom to 0
                 ImGui::PopItemWidth();
                 ImGui::SetItemTooltip(
                     "Horizontal zoom — pixels per second\n"
@@ -3221,13 +3357,17 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                 ImGui::Separator();
 
                 // --- Timeline ruler -------------------------------------------
+                // s_tl_scroll_x: persistent horizontal scroll offset (pixels)
+                static float s_tl_scroll_x = 0.f;
+
                 float ruler_h = 28.f;
                 double new_ph = widgets::TimelineRuler("##ruler",
                                                        state.playhead_s,
                                                        state.loop_end_s,
                                                        avail_w, ruler_h,
                                                        ctx.timeline_zoom,
-                                                       state.bpm);
+                                                       state.bpm,
+                                                       &s_tl_scroll_x);
                 if (new_ph >= 0.0) {
                     state.playhead_s = new_ph;
                     if (cbs.on_seek) cbs.on_seek(new_ph);
@@ -3235,8 +3375,6 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
 
                 // --- Cue blocks -----------------------------------------------
                 float lane_h  = 30.f;
-                float block_y = ImGui::GetCursorScreenPos().y;
-                ImDrawList* dl = ImGui::GetWindowDrawList();
 
                 // Empty-state placeholder when no cues are placed
                 if (state.timeline_cues.empty()) {
@@ -3253,24 +3391,35 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                     max_track = std::max(max_track, tc.track);
                 int num_tracks = std::max(max_track + 1, 2);
 
-                // Draw lane backgrounds
+                // Lane area — manual scroll via s_tl_scroll_x (no child window needed)
+                float total_tl_h = num_tracks * (lane_h + 2.f) + 4.f;
+                float total_tl_w = std::max(avail_w,
+                                            (float)(state.loop_end_s * ctx.timeline_zoom) + 200.f);
+                // Clamp scroll so we never scroll past the end
+                float max_scroll = std::max(0.f, total_tl_w - avail_w);
+                s_tl_scroll_x = std::clamp(s_tl_scroll_x, 0.f, max_scroll);
+
+                float scroll_x = s_tl_scroll_x;
                 ImVec2 lane_origin = ImGui::GetCursorScreenPos();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+
+                // Draw lane backgrounds
                 for (int tr = 0; tr < num_tracks; ++tr) {
                     ImU32 lane_bg = (tr % 2 == 0)
                         ? IM_COL32(22, 25, 33, 255)
                         : IM_COL32(18, 20, 28, 255);
                     dl->AddRectFilled(
-                        ImVec2(lane_origin.x, block_y + tr * (lane_h + 2.f)),
+                        ImVec2(lane_origin.x, lane_origin.y + tr * (lane_h + 2.f)),
                         ImVec2(lane_origin.x + avail_w,
-                               block_y + tr * (lane_h + 2.f) + lane_h),
+                               lane_origin.y + tr * (lane_h + 2.f) + lane_h),
                         lane_bg);
                 }
 
                 // Draw cue blocks
                 for (const auto& tc : state.timeline_cues) {
-                    float bx = lane_origin.x + (float)(tc.start_s * ctx.timeline_zoom);
+                    float bx = lane_origin.x - scroll_x + (float)(tc.start_s * ctx.timeline_zoom);
                     float bw = (float)(tc.duration_s * ctx.timeline_zoom);
-                    float by = block_y + tc.track * (lane_h + 2.f);
+                    float by = lane_origin.y + tc.track * (lane_h + 2.f);
 
                     ImVec4 block_col = { 0.f, 0.898f, 1.f, 0.7f };
                     for (const auto& ci : state.cues) {
@@ -3307,16 +3456,23 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                     if (state.bpm > 1.f) {
                         float beat_s   = 60.f / state.bpm;
                         float total_lane_h = num_tracks * (lane_h + 2.f);
-                        float visible_w = avail_w;
-                        float t_max    = visible_w / ctx.timeline_zoom;
+                        // Guard: cap t_max to avoid infinite loop when zoom is tiny
+                        float t_max = (ctx.timeline_zoom > 0.01f)
+                                      ? std::min(total_tl_w / ctx.timeline_zoom, 3600.f)  // max 1 hour
+                                      : 0.f;
                         ImU32 beat_col = IM_COL32(0, 230, 255, 25);  // kAccentDim at 0.10
                         ImU32 bar_col  = IM_COL32(0, 230, 255, 50);  // kAccentDim stronger for bars
                         int   beat_num = 0;
-                        for (float t = 0.f; t < t_max; t += beat_s, ++beat_num) {
-                            float bx = lane_origin.x + t * ctx.timeline_zoom;
+                        int   beat_count_limit = 10000;
+                        int   beat_count = 0;
+                        for (float t = 0.f; t < t_max && beat_count < beat_count_limit; t += beat_s, ++beat_num, ++beat_count) {
+                            float bx = lane_origin.x - scroll_x + t * ctx.timeline_zoom;
+                            // Skip lines that are off the visible viewport
+                            if (bx < lane_origin.x - 2.f || bx > lane_origin.x + avail_w + 2.f)
+                                continue;
                             ImU32 col = (beat_num % 4 == 0) ? bar_col : beat_col;
-                            dl->AddLine(ImVec2(bx, block_y),
-                                        ImVec2(bx, block_y + total_lane_h),
+                            dl->AddLine(ImVec2(bx, lane_origin.y),
+                                        ImVec2(bx, lane_origin.y + total_lane_h),
                                         col, 1.f);
                         }
                     }
@@ -3324,16 +3480,48 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
 
                 // Playhead line over blocks — 2px kAccent
                 {
-                    float ph_x = lane_origin.x +
+                    float ph_x = lane_origin.x - scroll_x +
                                  (float)(state.playhead_s * ctx.timeline_zoom);
                     float total_lane_h = num_tracks * (lane_h + 2.f);
-                    dl->AddLine(ImVec2(ph_x, block_y),
-                                ImVec2(ph_x, block_y + total_lane_h),
+                    dl->AddLine(ImVec2(ph_x, lane_origin.y),
+                                ImVec2(ph_x, lane_origin.y + total_lane_h),
                                 ImGui::ColorConvertFloat4ToU32(theme::accent()), 2.f);
                 }
 
-                // Advance cursor past lanes
-                ImGui::Dummy(ImVec2(avail_w, num_tracks * (lane_h + 2.f)));
+                // Mouse-wheel over lane area scrolls horizontally
+                {
+                    ImVec2 tl_min = lane_origin;
+                    ImVec2 tl_max = ImVec2(lane_origin.x + avail_w,
+                                           lane_origin.y + total_tl_h);
+                    if (ImGui::IsMouseHoveringRect(tl_min, tl_max)) {
+                        float wheel = ImGui::GetIO().MouseWheel;
+                        if (wheel != 0.f) {
+                            s_tl_scroll_x -= wheel * 80.f;
+                            s_tl_scroll_x = std::clamp(s_tl_scroll_x, 0.f, max_scroll);
+                        }
+                    }
+                }
+
+                // Thin custom scrollbar at the bottom of the lane area
+                {
+                    const float bar_h = 7.f;
+                    float bar_y = lane_origin.y + total_tl_h;
+                    dl->AddRectFilled(ImVec2(lane_origin.x, bar_y),
+                                      ImVec2(lane_origin.x + avail_w, bar_y + bar_h),
+                                      IM_COL32(18, 20, 28, 220));
+                    if (max_scroll > 0.f) {
+                        float thumb_ratio  = avail_w / total_tl_w;
+                        float thumb_w      = std::max(24.f, thumb_ratio * avail_w);
+                        float scroll_ratio = s_tl_scroll_x / max_scroll;
+                        float thumb_x      = lane_origin.x +
+                                             scroll_ratio * (avail_w - thumb_w);
+                        dl->AddRectFilled(ImVec2(thumb_x, bar_y + 1.f),
+                                          ImVec2(thumb_x + thumb_w, bar_y + bar_h - 1.f),
+                                          IM_COL32(0, 180, 220, 160), 3.f);
+                    }
+                    // Advance cursor so the DMX section appears below the scrollbar
+                    ImGui::Dummy(ImVec2(avail_w, total_tl_h + bar_h));
+                }
 
                 // --- DMX Activity bar -----------------------------------------
                 ImGui::Separator();
@@ -3476,6 +3664,11 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                 float cs_table_w  = cs_avail_w - cs_props_w - (cs_props_w > 0.f ? 6.f : 0.f);
                 float cs_avail_h  = ImGui::GetContentRegionAvail().y;
 
+                // Delay/Hold per-cue arrays: declared here so both the table rows and
+                // the properties panel can read/write the same values.
+                static float s_di[1024]{};
+                static float s_hld[1024]{};
+
                 // ── Main cue table ───────────────────────────────────────────
                 ImGui::BeginChild("##cs_table_area", ImVec2(cs_table_w, cs_avail_h), ImGuiChildFlags_None);
 
@@ -3495,10 +3688,6 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                     ImGui::TableSetupColumn("State",    ImGuiTableColumnFlags_WidthFixed,   58.f);
                     ImGui::TableSetupColumn("Notes",    ImGuiTableColumnFlags_WidthStretch, 0.8f);
                     ImGui::TableHeadersRow();
-
-                    // Delay/Hold per-cue arrays (hoisted so Set All row can write them)
-                    static float s_di[1024]{};
-                    static float s_hld[1024]{};
 
                     // ── Set All row: drag a value to apply it to every cue ──────
                     {
@@ -3862,21 +4051,24 @@ void panel_timeline(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
 
                         float fi  = ci.fade_in;
                         float fo  = ci.fade_out;
-                        float di  = 0.f;
-                        float hld = 0.f;
+                        float di  = (sel < 1024) ? s_di[sel]  : 0.f;
+                        float hld = (sel < 1024) ? s_hld[sel] : 0.f;
                         float do_ = 0.f;
                         float wt  = 0.f;
 
                         ImGui::PushItemWidth(-1.f);
                         bool t_ch = false;
-                        t_ch |= DragTimingFloat("Fade In##p",  &fi,  0.05f, 0.f,  60.f, state.bpm);
-                        t_ch |= DragTimingFloat("Fade Out##p", &fo,  0.05f, 0.f,  60.f, state.bpm);
-                        t_ch |= DragTimingFloat("Delay In##p", &di,  0.05f, 0.f,  60.f, state.bpm);
-                        t_ch |= DragTimingFloat("Hold##p",     &hld, 0.05f, 0.f, 600.f, state.bpm);
-                        DragTimingFloat("Delay Out##p", &do_, 0.05f, 0.f,  60.f, state.bpm);
-                        DragTimingFloat("Wait##p",      &wt,  0.05f, 0.f, 600.f, state.bpm);
-                        if (t_ch && cbs.on_set_cue_timing)
-                            cbs.on_set_cue_timing(sel, fi, fo, di, hld);
+                        t_ch |= DragTimingFloat("Fade In##p",  &fi,  0.05f, 0.f,  60.f, state.bpm, state.timing_display_mode);
+                        t_ch |= DragTimingFloat("Fade Out##p", &fo,  0.05f, 0.f,  60.f, state.bpm, state.timing_display_mode);
+                        t_ch |= DragTimingFloat("Delay In##p", &di,  0.05f, 0.f,  60.f, state.bpm, state.timing_display_mode);
+                        t_ch |= DragTimingFloat("Hold##p",     &hld, 0.05f, 0.f, 600.f, state.bpm, state.timing_display_mode);
+                        DragTimingFloat("Delay Out##p", &do_, 0.05f, 0.f,  60.f, state.bpm, state.timing_display_mode);
+                        DragTimingFloat("Wait##p",      &wt,  0.05f, 0.f, 600.f, state.bpm, state.timing_display_mode);
+                        if (t_ch) {
+                            if (sel < 1024) { s_di[sel] = di; s_hld[sel] = hld; }
+                            if (cbs.on_set_cue_timing)
+                                cbs.on_set_cue_timing(sel, fi, fo, di, hld);
+                        }
                         ImGui::PopItemWidth();
 
                         ImGui::Separator();
@@ -4744,8 +4936,40 @@ static bool draw_premade_shapes_panel(FrameEditorState& fe)
     };
     int func_idx = static_cast<int>(ps.func);
     ImGui::SetNextItemWidth(-1.f);
-    if (ImGui::Combo("##func_type", &func_idx, func_names, 8))
+    if (ImGui::Combo("##func_type", &func_idx, func_names, 8)) {
+        FT old_func = ps.func;
         ps.func = static_cast<FT>(func_idx);
+        // Reset params to sensible defaults when switching function type
+        if (ps.func != old_func) {
+            switch (ps.func) {
+            case FT::Linear:
+                ps.param_a = 1.f; ps.param_b = 0.f; ps.param_c = 0.f; ps.param_d = 0.f;
+                break;
+            case FT::Quadratic:
+                ps.param_a = 1.f; ps.param_b = 0.f; ps.param_c = 0.f; ps.param_d = 0.f;
+                break;
+            case FT::Cubic:
+                ps.param_a = 1.f; ps.param_b = 0.f; ps.param_c = 0.f; ps.param_d = 0.f;
+                break;
+            case FT::Sine:
+            case FT::Cosine:
+                ps.param_a = 1.f;   // amplitude
+                ps.param_b = 1.f;   // 1 full cycle across x_min..x_max
+                ps.param_c = 0.f;   // phase 0°
+                ps.param_d = 0.f;   // no vertical offset
+                break;
+            case FT::Circle:
+                ps.param_a = 1.f;   // radius
+                break;
+            case FT::Spiral:
+                ps.param_a = 1.f; ps.param_b = 3.f;   // radius mult, 3 turns
+                break;
+            case FT::Lissajous:
+                ps.lissajous_a = 3.f; ps.lissajous_b = 2.f; ps.lissajous_delta = 0.f;
+                break;
+            }
+        }
+    }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Select the mathematical function to place objects along");
 
@@ -4799,7 +5023,7 @@ static bool draw_premade_shapes_panel(FrameEditorState& fe)
     ps.sample_count = std::clamp(ps.sample_count, 2, 64);
 
     // x_min / x_max only make sense for non-parametric functions
-    bool parametric = (ps.func == FT::Circle || ps.func == FT::Spiral || ps.func == FT::Lissajous || ps.func == FT::Linear);
+    bool parametric = (ps.func == FT::Circle || ps.func == FT::Spiral || ps.func == FT::Lissajous);
     if (parametric) ImGui::BeginDisabled(true);
     ImGui::SetNextItemWidth(200.f);
     ImGui::DragFloat("X min##xmin", &ps.x_min, 0.01f, -20.f, 20.f, "%.2f");
@@ -5050,7 +5274,7 @@ void panel_frame_editor(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
     //  CONTENT AREA
     // =========================================================================
     ImVec2 avail      = ImGui::GetContentRegionAvail();
-    float  tl_reserve = fe.show_keyframe_editor ? 92.f : 0.f;
+    float  tl_reserve = 0.f;
     float  content_h  = avail.y - tl_reserve;
     if (content_h < 40.f) content_h = 40.f;
 
@@ -5933,8 +6157,7 @@ void panel_frame_editor(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
         // Resolve which objects to render (live or interpolated)
         const std::vector<LaserObject>* render_objs = &fe.objects;
         std::vector<LaserObject> interp_objs;
-        bool kf_preview = fe.anim_playing ||
-            (fe.show_keyframe_editor && (int)fe.anim_frames.size() >= 2);
+        bool kf_preview = fe.anim_playing && !fe.anim_frames.empty();
         if (kf_preview && (int)fe.anim_frames.size() >= 2) {
             const FrameEditorState::AnimFrame* fA = &fe.anim_frames.front();
             const FrameEditorState::AnimFrame* fB = &fe.anim_frames.back();
@@ -6407,7 +6630,7 @@ void panel_frame_editor(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
                     fe.active_tool = Tool::Rotate;
                     fe.wip_points.clear(); fe.drawing = false;
                 }
-                if (ImGui::IsKeyPressed(ImGuiKey_S, false)) {
+                if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !ImGui::GetIO().KeyCtrl) {
                     fe.active_tool = Tool::Scale;
                     fe.wip_points.clear(); fe.drawing = false;
                 }
@@ -6595,7 +6818,11 @@ void panel_frame_editor(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
                                     if (obj.id == id)
                                         fe.obj_drag_orig_pts.push_back(obj.pts);
                         } else {
-                            if (!ctrl_held) fe.selected_ids.clear();
+                            if (!ctrl_held) {
+                                fe.selected_ids.clear();
+                                if (fe.symmetry != FrameEditorState::SymmetryMode::None)
+                                    fe_apply_symmetry_to_all_objects(fe);
+                            }
                             fe.box_selecting = true;
                             fe.box_x0 = nmx; fe.box_y0 = nmy;
                             fe.box_x1 = nmx; fe.box_y1 = nmy;
@@ -6619,6 +6846,13 @@ void panel_frame_editor(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
                                 }
                             }
                         }
+                        // Real-time symmetry update while dragging objects
+                        if (fe.symmetry != FrameEditorState::SymmetryMode::None) {
+                            if (fe.symmetry_act_mode)
+                                fe_apply_symmetry_to_all_objects(fe);
+                            else
+                                fe_apply_symmetry_to_objects(fe, canvas_w, content_h);
+                        }
                     }
                     if (lmb_released) {
                         if (fe.box_selecting) {
@@ -6637,6 +6871,12 @@ void panel_frame_editor(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
                             fe.box_selecting = false;
                         }
                         fe.obj_dragging = false;
+                        if (fe.symmetry != FrameEditorState::SymmetryMode::None) {
+                            if (fe.symmetry_act_mode)
+                                fe_apply_symmetry_to_all_objects(fe);
+                            else
+                                fe_apply_symmetry_to_objects(fe, canvas_w, content_h);
+                        }
                     }
                 }
                 // NODE EDIT tool
@@ -7404,177 +7644,10 @@ void panel_frame_editor(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
     } // end Keyframe layer
 
 fe_timeline_draw:
-    // =========================================================================
-    //  KEYFRAME TIMELINE (bottom bar)
-    // =========================================================================
-    if (fe.show_keyframe_editor) {
-        ImGui::Dummy(ImVec2(0.f, 2.f));
-
-        float tl_w = ImGui::GetContentRegionAvail().x;
-        float tl_h = 52.f;
-
-        ImVec2 tl_pos = ImGui::GetCursorScreenPos();
-        ImDrawList* tdl = ImGui::GetWindowDrawList();
-        tdl->AddRectFilled(tl_pos, {tl_pos.x + tl_w, tl_pos.y + tl_h},
-                           IM_COL32(10,10,16,255));
-        tdl->AddRect(tl_pos, {tl_pos.x + tl_w, tl_pos.y + tl_h},
-                     IM_COL32(55,55,75,200));
-
-        ImGui::InvisibleButton("##fe_anim_tl", ImVec2(tl_w, tl_h));
-        bool tl_hov = ImGui::IsItemHovered();
-        bool tl_clk = ImGui::IsItemClicked(ImGuiMouseButton_Left);
-        ImVec2 tl_mp = ImGui::GetIO().MousePos;
-
-        float dur = std::max(fe.anim_duration, 0.1f);
-        auto t2x = [&](float t) -> float { return tl_pos.x + (t / dur) * tl_w; };
-        auto x2t = [&](float x) -> float {
-            return std::clamp((x - tl_pos.x) / tl_w * dur, 0.f, dur);
-        };
-
-        // Tick marks
-        for (float ts = 0.f; ts <= dur + 0.01f; ts += 0.5f) {
-            float tx = t2x(ts);
-            bool whole = (std::fmod(ts + 0.01f, 1.f) < 0.02f);
-            tdl->AddLine({tx, tl_pos.y}, {tx, tl_pos.y + (whole ? 10.f : 5.f)},
-                         IM_COL32(110,110,130,180), 1.f);
-            if (whole) {
-                char lbl[8]; std::snprintf(lbl, sizeof(lbl), "%.0fs", ts);
-                tdl->AddText({tx+2.f, tl_pos.y+1.f}, IM_COL32(130,130,150,200), lbl);
-            }
-        }
-
-        // Playhead
-        {
-            float ph_x = t2x(fe.anim_current_time);
-            tdl->AddLine({ph_x, tl_pos.y}, {ph_x, tl_pos.y + tl_h},
-                         IM_COL32(0,230,255,220), 2.f);
-            static bool s_ph_drag = false;
-            if (tl_hov && tl_clk) s_ph_drag = true;
-            if (s_ph_drag && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                fe.anim_current_time = x2t(tl_mp.x);
-            } else {
-                s_ph_drag = false;
-            }
-        }
-
-        // AnimFrame diamonds
-        static int s_af_drag   = -1;
-        static int s_af_rclick = -1;
-        float dr = 6.f;
-        float ky = tl_pos.y + tl_h * 0.65f;
-
-        for (int fi = 0; fi < (int)fe.anim_frames.size(); ++fi) {
-            float kx = t2x(fe.anim_frames[fi].time_s);
-            ImU32 kc = (fe.anim_selected_frame == fi)
-                ? ImGui::ColorConvertFloat4ToU32(theme::accent())
-                : IM_COL32(200,180,50,255);
-            tdl->AddQuadFilled({kx,ky-dr},{kx+dr,ky},{kx,ky+dr},{kx-dr,ky}, kc);
-            float ddx = tl_mp.x - kx, ddy = tl_mp.y - ky;
-            bool hit = (std::abs(ddx) + std::abs(ddy)) < dr + 3.f;
-            if (hit && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                fe.anim_selected_frame  = fi;
-                s_af_drag               = fi;
-                fe_push_undo();
-                fe.objects              = fe.anim_frames[fi].objects;
-                fe.anim_current_time    = fe.anim_frames[fi].time_s;
-            }
-            if (hit && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                fe.anim_selected_frame = fi;
-                s_af_rclick = fi;
-                ImGui::OpenPopup("##af_ctx");
-            }
-        }
-
-        if (s_af_drag >= 0 && s_af_drag < (int)fe.anim_frames.size()) {
-            if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
-                fe.anim_frames[s_af_drag].time_s = x2t(tl_mp.x);
-            else s_af_drag = -1;
-        }
-
-        if (ImGui::BeginPopup("##af_ctx")) {
-            if (s_af_rclick >= 0 && s_af_rclick < (int)fe.anim_frames.size()) {
-                ImGui::TextDisabled("Frame @ %.2fs", fe.anim_frames[s_af_rclick].time_s);
-                ImGui::Separator();
-                if (ImGui::MenuItem("Delete")) {
-                    fe.anim_frames.erase(fe.anim_frames.begin() + s_af_rclick);
-                    if (fe.anim_selected_frame == s_af_rclick) fe.anim_selected_frame = -1;
-                    s_af_rclick = -1;
-                }
-            }
-            ImGui::EndPopup();
-        }
-
-        // Timeline toolbar
-        ImGui::Dummy(ImVec2(0.f, 2.f));
-
-        if (fe.anim_playing) {
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.65f,0.50f,0.05f,1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.80f,0.65f,0.10f,1.f));
-            if (ImGui::Button("Stop##tl")) fe.anim_playing = false;
-            ImGui::PopStyleColor(2);
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.05f,0.45f,0.10f,1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.10f,0.60f,0.15f,1.f));
-            if (ImGui::Button("Play##tl")) {
-                fe.anim_playing = true;
-                if (fe.anim_current_time >= fe.anim_duration) fe.anim_current_time = 0.f;
-            }
-            ImGui::PopStyleColor(2);
-        }
-
-        ImGui::SameLine(0, 4);
-
-        if (ImGui::Button("+KF##af")) {
-            FrameEditorState::AnimFrame af;
-            af.time_s  = fe.anim_current_time;
-            af.objects = fe.objects;
-            auto it = fe.anim_frames.begin();
-            while (it != fe.anim_frames.end() && it->time_s < af.time_s) ++it;
-            int ni = (int)(it - fe.anim_frames.begin());
-            fe.anim_frames.insert(it, std::move(af));
-            fe.anim_selected_frame = ni;
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add keyframe at current time");
-
-        ImGui::SameLine(0, 4);
-
-        bool has_af = (fe.anim_selected_frame >= 0 &&
-                       fe.anim_selected_frame < (int)fe.anim_frames.size());
-        if (!has_af) ImGui::BeginDisabled();
-        if (ImGui::Button("DelKF##af")) {
-            fe.anim_frames.erase(fe.anim_frames.begin() + fe.anim_selected_frame);
-            fe.anim_selected_frame = -1;
-        }
-        if (!has_af) ImGui::EndDisabled();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete selected keyframe");
-
-
-        ImGui::SameLine(0, 8);
-        ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
-        ImGui::SameLine(0, 8);
-
-        ImGui::PushItemWidth(80.f);
-        DragTimingFloat("Dur##af", &fe.anim_duration, 0.1f, 0.5f, 600.f, state.bpm);
-        ImGui::PopItemWidth();
-
-        ImGui::SameLine(0, 8);
-
-        char tbuf[32];
-        std::snprintf(tbuf, sizeof(tbuf), "%.2f / %.2fs", fe.anim_current_time, fe.anim_duration);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertFloat4ToU32(theme::accent()));
-        ImGui::TextUnformatted(tbuf);
-        ImGui::PopStyleColor();
-
-        // Also show the keyframe toggle button so user can close timeline
-        ImGui::SameLine(0, 8);
-        ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
-        ImGui::SameLine(0, 8);
-        if (ImGui::Button("Hide TL##fe_tl")) fe.show_keyframe_editor = false;
-    } else {
-        // Show "Timeline" button when hidden
-        if (ImGui::Button("Timeline##fe_tl_show")) fe.show_keyframe_editor = true;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show keyframe timeline");
-    }
+    // "Timeline" button — opens the Timeline Editor panel
+    if (ImGui::Button("Timeline##fe_open_tl"))
+        ctx.timeline_view_open = true;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open Timeline Editor");
 
     // ── Premade Shapes floating panel (only when tool is active) ────────────
     if (fe.active_layer == AL::Keyframe &&
@@ -7668,12 +7741,20 @@ static void draw_pbconf_popup(UIState& state, LayoutContext& ctx, LayoutCallback
     char popup_title[32];
     std::snprintf(popup_title, sizeof(popup_title), "PB %d Config##pbcfg", ctx.pbconf_open_id);
 
-    ImGui::SetNextWindowSize(ImVec2(380.f, 0.f), ImGuiCond_Appearing);
-    ImGui::SetNextWindowSizeConstraints(ImVec2(340.f, 260.f), ImVec2(600.f, FLT_MAX));
+    ImGui::SetNextWindowSize(ImVec2(400.f, 560.f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(340.f, 300.f), ImVec2(640.f, 800.f));
 
     static UIState::PlaybackConf s_edit;
-    static int s_edit_id = -1;
+    static int s_edit_id      = -1;
+    static int s_prev_name_id = -1;
     if (s_edit_id != ctx.pbconf_open_id) {
+        // Seed name from the live snap so the field shows the current PB name
+        for (int pi = 0; pi < UIState::kMaxPlaybacks; ++pi) {
+            if (state.snap.playbacks[pi].id == ctx.pbconf_open_id) {
+                conf.name = state.snap.playbacks[pi].name;
+                break;
+            }
+        }
         s_edit    = conf;
         s_edit_id = ctx.pbconf_open_id;
     }
@@ -7682,9 +7763,27 @@ static void draw_pbconf_popup(UIState& state, LayoutContext& ctx, LayoutCallback
     ImGui::OpenPopup(popup_title);
 
     bool open = true;
-    if (ImGui::BeginPopupModal(popup_title, &open,
-                               ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
+    if (ImGui::BeginPopupModal(popup_title, &open, ImGuiWindowFlags_NoCollapse)) {
         ImGui::TextColored(ImVec4(0.f, 0.9f, 1.f, 1.f), "PB %d Configuration", ctx.pbconf_open_id);
+        ImGui::Spacing();
+
+        // Scrollable body — Apply/Cancel buttons sit outside this child so they stay visible
+        ImGui::BeginChild("##pbconf_body", ImVec2(-1.f, -52.f), ImGuiChildFlags_None);
+
+        // ── Playback Name ──────────────────────────────────────────────────────
+        ImGui::Separator();
+        {
+            static char s_name_buf[64] = {};
+            if (s_edit_id != s_prev_name_id) {
+                std::strncpy(s_name_buf, conf.name.c_str(), sizeof(s_name_buf) - 1);
+                s_name_buf[sizeof(s_name_buf) - 1] = '\0';
+                s_prev_name_id = s_edit_id;
+            }
+            ImGui::SetNextItemWidth(-1.f);
+            ImGui::InputText("##pb_name_edit", s_name_buf, sizeof(s_name_buf));
+            if (ImGui::IsItemDeactivatedAfterEdit())
+                conf.name = std::string(s_name_buf);
+        }
         ImGui::Spacing();
 
         const char* dmx_modes[] = { "Off", "1-Channel", "2-Channel" };
@@ -7705,6 +7804,32 @@ static void draw_pbconf_popup(UIState& state, LayoutContext& ctx, LayoutCallback
             if (s_edit.dmx_mode == UIState::PlaybackConf::DmxMode::TwoChannel) {
                 ImGui::TextDisabled("Ch1 = intensity (0-255)");
                 ImGui::TextDisabled("Ch2 = GO (rising edge triggers advance)");
+            }
+
+            // ── Live DMX monitor ─────────────────────────────────────────────
+            ImGui::Spacing();
+            if (s_edit.dmx_universe >= 0 && s_edit.dmx_universe < 2) {
+                int     ch_1b   = std::clamp(s_edit.dmx_channel, 1, 512);
+                // DMX snapshot is in state.dmx_uni_0 / dmx_uni_1 (not state.snap)
+                const DmxUniverse& dmx_uni = (s_edit.dmx_universe == 0)
+                                           ? state.dmx_uni_0 : state.dmx_uni_1;
+                uint8_t raw_val = dmx_uni.ch[static_cast<size_t>(ch_1b - 1)];
+                float frac      = raw_val / 255.f;
+                bool  triggered = raw_val > static_cast<uint8_t>(
+                                      std::clamp(s_edit.dmx_threshold, 0, 255));
+                char bar_label[40];
+                std::snprintf(bar_label, sizeof(bar_label), "U%d Ch%d: %d / 255",
+                              s_edit.dmx_universe, ch_1b, static_cast<int>(raw_val));
+                ImGui::ProgressBar(frac, ImVec2(-1.f, 0.f), bar_label);
+                if (triggered)
+                    ImGui::TextColored(ImVec4(0.1f, 1.f, 0.3f, 1.f),
+                                       "  TRIGGER  (value %d > threshold %d)",
+                                       static_cast<int>(raw_val), s_edit.dmx_threshold);
+                else
+                    ImGui::TextDisabled("  below threshold  (%d / %d)",
+                                        static_cast<int>(raw_val), s_edit.dmx_threshold);
+            } else {
+                ImGui::TextDisabled("(live monitor not available for universe > 1)");
             }
         }
 
@@ -7744,30 +7869,6 @@ static void draw_pbconf_popup(UIState& state, LayoutContext& ctx, LayoutCallback
         ImGui::Checkbox("FX at BPM##fx_bpm", &s_edit.fx_at_bpm);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Run all FX at BPM tempo (rate=1 = 1 cycle per beat)");
 
-        ImGui::SeparatorText("Output Assignment");
-        if (state.patched_outputs.empty()) {
-            ImGui::TextDisabled("No outputs patched.");
-        } else {
-            ImGui::TextDisabled("(none checked = all outputs)");
-            for (const auto& po : state.patched_outputs) {
-                bool assigned = std::find(s_edit.output_stream_ids.begin(),
-                                          s_edit.output_stream_ids.end(),
-                                          po.id) != s_edit.output_stream_ids.end();
-                char lbl[64];
-                std::snprintf(lbl, sizeof(lbl), "%s##os_%d", po.name.c_str(), po.id);
-                if (ImGui::Checkbox(lbl, &assigned)) {
-                    if (assigned) {
-                        s_edit.output_stream_ids.push_back(po.id);
-                    } else {
-                        s_edit.output_stream_ids.erase(
-                            std::remove(s_edit.output_stream_ids.begin(),
-                                        s_edit.output_stream_ids.end(), po.id),
-                            s_edit.output_stream_ids.end());
-                    }
-                }
-            }
-        }
-
         ImGui::SeparatorText("Keyboard GO Trigger");
         {
             char key_label[32] = "None";
@@ -7794,14 +7895,17 @@ static void draw_pbconf_popup(UIState& state, LayoutContext& ctx, LayoutCallback
             }
         }
 
-        ImGui::Spacing();
+        ImGui::EndChild();  // ##pbconf_body
+
         ImGui::Separator();
         ImGui::Spacing();
         if (ImGui::Button("Apply##pba", ImVec2(100.f, 0.f))) {
             conf = s_edit;
             s_edit.key_capturing = false;
             if (cbs.on_playback_config) cbs.on_playback_config(ctx.pbconf_open_id, s_edit);
-            ctx.pbconf_open_id = -1; s_edit_id = -1;
+            if (cbs.on_playback_rename && !conf.name.empty())
+                cbs.on_playback_rename(ctx.pbconf_open_id, conf.name);
+            ctx.pbconf_open_id = -1; s_edit_id = -1; s_prev_name_id = -1;
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine(0, 8.f);
@@ -7913,11 +8017,11 @@ static void draw_show_view_grid(UIState& state, LayoutContext& ctx, LayoutCallba
 
         // CFG button — right side of name row
         {
-            float cfg_w = 22.f;
+            float cfg_w = 38.f;
             ImGui::SameLine(kCardW - cfg_w - ImGui::GetStyle().WindowPadding.x - 2.f);
             ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.18f, 0.18f, 0.22f, 1.f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.28f, 0.35f, 1.f));
-            if (ImGui::Button("CFG##cfg", ImVec2(cfg_w, 16.f)))
+            if (ImGui::Button("CFG##cfg", ImVec2(cfg_w, ImGui::GetFrameHeight())))
                 ctx.pbconf_open_id = i + 1;
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Configure playback %d: DMX trigger, loop mode, keyboard key", i + 1);
@@ -7972,6 +8076,7 @@ static void draw_show_view_grid(UIState& state, LayoutContext& ctx, LayoutCallba
                     if (!feed.objects.empty()) {
                         KeyframeLayer kf;
                         kf.objects = feed.objects;
+                        kf.symmetry_mode = static_cast<int>(ctx.frame_editor.symmetry);
                         fce.per_stream_kf[sid] = kf;
                     }
                 }
@@ -8104,12 +8209,21 @@ void panel_playback_bar(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
 
     static constexpr float kTlStripH = 36.f;  // timeline quick-fire strip height
     float init_h = kBarH + kTlStripH + ImGui::GetFrameHeight() + 4.f;
+
+    // Persistent height — starts at default, updated each frame to track user resizing
+    static float s_bar_h = 0.f;
+    if (s_bar_h < 1.f) s_bar_h = init_h;
+
+    // Lock width to viewport width; allow vertical resize only
+    ImGui::SetNextWindowSizeConstraints(
+        ImVec2(vp->WorkSize.x, 80.f),
+        ImVec2(vp->WorkSize.x, vp->WorkSize.y * 0.8f));
     ImGui::SetNextWindowPos(
-        ImVec2(vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - init_h),
+        ImVec2(vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - s_bar_h),
         ImGuiCond_Always);
     ImGui::SetNextWindowSize(
-        ImVec2(vp->WorkSize.x, init_h),
-        ImGuiCond_Always);
+        ImVec2(vp->WorkSize.x, s_bar_h),
+        ImGuiCond_Once);
     ImGui::SetNextWindowViewport(vp->ID);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.f, 4.f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.f);
@@ -8121,6 +8235,10 @@ void panel_playback_bar(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
         return;
     }
     ImGui::PopStyleVar(3);
+    // Track actual height so bottom-anchor position stays correct across user resizing
+    s_bar_h = ImGui::GetWindowSize().y;
+    // Always bring to display front — nothing can overlap the playback bar
+    ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
 
     // How wide should each of the 10 slots be?
     // Reserve ~60px on the right for the master fader.
@@ -8270,6 +8388,7 @@ void panel_playback_bar(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
                     if (!feed.objects.empty()) {
                         KeyframeLayer kf;
                         kf.objects = feed.objects;
+                        kf.symmetry_mode = static_cast<int>(ctx.frame_editor.symmetry);
                         fce.per_stream_kf[sid] = kf;
                     }
                 }

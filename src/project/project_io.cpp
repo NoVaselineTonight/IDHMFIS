@@ -9,6 +9,7 @@
 #include <chrono>
 #include <ctime>
 #include <iomanip>
+#include <cstdio>
 #include <stdexcept>
 #include <filesystem>
 
@@ -204,27 +205,21 @@ ValidationResult validate_project_file(const std::string& path) {
     result.schema_version_found = j.value("schema_version", std::string{});
 
     {
-        // Accept current version and one previous version for backward compatibility.
-        static const std::vector<std::string> kKnownVersions = {
-            kCurrentSchemaVersion,
-            "2.8.0"   // previous release — fields added in 2.9.0 get defaults on load
+        auto parse_ver = [](const std::string& v) -> std::tuple<int,int,int> {
+            int maj = 0, min = 0, patch = 0;
+            std::sscanf(v.c_str(), "%d.%d.%d", &maj, &min, &patch);
+            return {maj, min, patch};
         };
-        bool version_known = false;
-        for (const auto& kv : kKnownVersions)
-            if (result.schema_version_found == kv) { version_known = true; break; }
+        auto file_ver    = parse_ver(result.schema_version_found);
+        auto current_ver = parse_ver(kCurrentSchemaVersion);
 
-        if (!version_known) {
-            result.error = "Unsupported schema version '" + result.schema_version_found
-                         + "'. This file was created by a newer version of IDHMFIS.";
+        if (file_ver > current_ver) {
+            result.error = "This file was created by a newer version of IDHMFIS (schema "
+                         + result.schema_version_found
+                         + "). Please update the application.";
             result.ok = false;
             return result;
         }
-    }
-
-    // Basic required field check
-    if (!j.contains("name")) {
-        result.error = "Missing required field: name";
-        return result;
     }
 
     result.ok = true;

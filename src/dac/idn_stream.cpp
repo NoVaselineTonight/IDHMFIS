@@ -175,8 +175,20 @@ bool IdnStreamOutput::send_frame(const PointBuffer& pts, int target_pps) {
 // ─────────────────────────────────────────────────────────────────────────────
 IdnPoint IdnStreamOutput::convert_point(const LaserPoint& p) {
     IdnPoint ip{};
-    ip.x = static_cast<int16_t>(htons(static_cast<uint16_t>(p.x)));
-    ip.y = static_cast<int16_t>(htons(static_cast<uint16_t>(p.y)));
+    // L-13: casting signed int16_t → uint16_t → htons → back to int16_t is UB
+    // for negative values (signed→unsigned reinterpretation is fine in C++20 but
+    // the roundtrip through htons reinterprets the swapped bytes as signed, which
+    // is implementation-defined in earlier standards). Use memcpy to reinterpret
+    // without UB: byte-swap the raw bits of the signed value directly.
+    {
+        uint16_t ux, uy;
+        std::memcpy(&ux, &p.x, 2);
+        std::memcpy(&uy, &p.y, 2);
+        ux = htons(ux);
+        uy = htons(uy);
+        std::memcpy(&ip.x, &ux, 2);
+        std::memcpy(&ip.y, &uy, 2);
+    }
     if (p.blanked) {
         ip.r = ip.g = ip.b = ip.i = 0;
     } else {

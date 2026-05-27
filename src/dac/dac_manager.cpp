@@ -43,7 +43,28 @@ DacManager::~DacManager() {
 //  start / stop
 // ─────────────────────────────────────────────────────────────────────────────
 void DacManager::start() {
+    // Hold lifecycle_mutex_ for the entire function so that a concurrent stop()
+    // call must wait until both scan_thread_ and output_thread_ exist before it
+    // attempts to join them.  Without this, stop() could race into the window
+    // between running_.exchange(true) and the thread constructions, find
+    // non-joinable threads, return immediately, and delete the manager while
+    // start() is still running — causing use-after-free zombie threads.
+    std::lock_guard<std::mutex> lifecycle_lk(lifecycle_mutex_);
+    // If stop() already ran (stop_requested_ set under this same mutex), bail
+    // immediately without creating threads.  This handles the race where a stop
+    // thread deletes the manager (via shared_ptr) before the detached start thread
+    // even enters start() — with shared_ptr the object stays alive, but we must
+    // not create scan/output threads for a manager that has been torn down.
+    if (stop_requested_.load(std::memory_order_relaxed)) return;
     if (running_.exchange(true)) return; // already running
+
+    // Stamp start time so is_healthy() can grant a grace period before the
+    // output thread's first iteration sets last_loop_ms_.
+    {
+        int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        started_at_ms_.store(now_ms, std::memory_order_relaxed);
+    }
 
     build_candidates();
 
@@ -70,6 +91,15 @@ void DacManager::start() {
         log::warn("DacManager: CommonLaserStream sidecar failed to open (non-fatal)");
     }
 
+    // Open virtual DirectShow/NDI camera sidecar — registers as "IDHMFIS Laser Preview"
+    // in the Windows Video Capture Sources category so Capture 2024 can open it as
+    // a video input.  Stream index 0 uses the canonical fixed names; stream N>0 gets
+    // indexed names so each head appears as a distinct NDI source.  Non-fatal.
+    virtual_camera_.set_stream_index(stream_idx_);
+    if (!virtual_camera_.open()) {
+        log::warn("DacManager: virtual camera sidecar failed to open (non-fatal)");
+    }
+
     scan_thread_   = std::thread([this]{ scan_thread_fn(); });
     output_thread_ = std::thread([this]{ output_thread_fn(); });
 
@@ -82,7 +112,23 @@ void DacManager::start() {
 }
 
 void DacManager::stop() {
-    if (!running_.exchange(false)) return;
+    // Acquire lifecycle_mutex_ briefly so we cannot set running_=false and
+    // proceed to join() while start() is still in its thread-creation section.
+    // Once we release the lock, start() has either (a) not yet been called,
+    // (b) already returned, or (c) seen running_=false and returned early —
+    // in all three cases scan_thread_ and output_thread_ are in a defined state.
+    {
+        std::lock_guard<std::mutex> lifecycle_lk(lifecycle_mutex_);
+        // Set stop_requested_ under the lock so start() (which also holds this
+        // lock) will see it and bail without creating threads.  This covers the
+        // race where the stop thread runs before the start thread: stop() returns
+        // early (running_ was false), but start() will also return early when it
+        // finally executes — preventing zombie threads on a deleted manager.
+        stop_requested_.store(true, std::memory_order_relaxed);
+        if (!running_.exchange(false)) return;
+    }
+    // lifecycle_mutex_ is released here.  The threads loop on running_.load()
+    // and will exit now that running_ is false.
 
     if (scan_thread_.joinable())   scan_thread_.join();
     if (output_thread_.joinable()) output_thread_.join();
@@ -96,14 +142,17 @@ void DacManager::stop() {
     // Close CommonLaserStream sidecar
     if (cls_sidecar_.is_open()) cls_sidecar_.close();
 
-    // Close all candidates
+    // Close virtual DirectShow/NDI camera sidecar
+    if (virtual_camera_.is_open()) virtual_camera_.close();
+
+    // Close all candidates and release the shared_ptr under a single lock pass.
     {
         std::lock_guard<std::mutex> lk(candidates_mutex_);
         for (auto& dac : candidates_)
             if (dac && dac->is_open()) dac->close();
+        active_sp_.reset(); // BUG #6: release shared ownership under the mutex
     }
-
-    active_.store(nullptr);
+    active_.store(nullptr, std::memory_order_release);
     log::info("DacManager: stopped");
 }
 
@@ -112,6 +161,12 @@ void DacManager::stop() {
 // ─────────────────────────────────────────────────────────────────────────────
 void DacManager::build_candidates() {
     std::lock_guard<std::mutex> lk(candidates_mutex_);
+    // BUG #5 + BUG #6: Null out active_ and active_sp_ before clearing the
+    // vector so the output thread never holds a raw pointer or shared reference
+    // into a destroyed element.  The output thread checks `if (dac && dac->is_open())`,
+    // so nullptr is handled safely.
+    active_sp_.reset();
+    active_.store(nullptr, std::memory_order_release);
     candidates_.clear();
 
     // Probe up to 4 physical Helios DACs (cover multi-DAC rigs)
@@ -146,10 +201,11 @@ void DacManager::scan_thread_fn() {
         if (force_flag_.exchange(false)) {
             std::lock_guard<std::mutex> lk(candidates_mutex_);
 
-            // Close current active
-            IDac* cur = active_.load();
+            // Close current active (BUG #6: reset shared_ptr first)
+            active_sp_.reset();
+            IDac* cur = active_.load(std::memory_order_relaxed);
             if (cur && cur->is_open()) cur->close();
-            active_.store(nullptr);
+            active_.store(nullptr, std::memory_order_release);
 
             // Create the forced driver and attempt to open
             std::unique_ptr<IDac> forced;
@@ -169,8 +225,15 @@ void DacManager::scan_thread_fn() {
 
             forced->set_point_rate(point_rate_);
             if (forced->open()) {
-                active_.store(forced.get());
+                // BUG #6: push first so shared_ptr aliases the unique_ptr owner,
+                // then set both active_sp_ and the fast-path atomic hint.
                 candidates_.push_back(std::move(forced));
+                IDac* raw = candidates_.back().get();
+                // Alias the unique_ptr managed object via a shared_ptr with a
+                // no-op deleter: lifetime is owned by unique_ptr in candidates_.
+                active_sp_ = std::shared_ptr<IDac>(candidates_.back().get(),
+                                                   [](IDac*){});
+                active_.store(raw, std::memory_order_release);
                 log::info("DacManager: forced DAC '%s' activated",
                           forced_type_.c_str());
             } else {
@@ -183,11 +246,13 @@ void DacManager::scan_thread_fn() {
         {
             std::lock_guard<std::mutex> lk(candidates_mutex_);
 
-            IDac* cur = active_.load();
+            IDac* cur = active_.load(std::memory_order_relaxed);
             if (cur && !cur->is_open()) {
                 log::warn("DacManager: active DAC '%s' disconnected",
                           cur->type_name());
-                active_.store(nullptr);
+                // BUG #6: reset shared_ptr under the mutex before clearing atomic
+                active_sp_.reset();
+                active_.store(nullptr, std::memory_order_release);
                 cur = nullptr;
             }
 
@@ -201,14 +266,21 @@ void DacManager::scan_thread_fn() {
                     for (auto& dac : candidates_) {
                         if (std::string(dac->type_name()) != type) continue;
                         if (dac->is_open()) {
-                            active_.store(dac.get());
+                            // BUG #35 + BUG #6: update active_sp_ and active_ while
+                            // still under candidates_mutex_ so the store is properly
+                            // sequenced after the push_back / is_open check.
+                            active_sp_ = std::shared_ptr<IDac>(dac.get(), [](IDac*){});
+                            active_.store(dac.get(), std::memory_order_release);
                             log::info("DacManager: activated '%s'", type);
                             goto done_scan;
                         }
                         // Try to open
                         dac->set_point_rate(point_rate_);
                         if (dac->open()) {
-                            active_.store(dac.get());
+                            // BUG #35 + BUG #6: store inside the mutex to guarantee
+                            // visibility ordering after the open() call completes.
+                            active_sp_ = std::shared_ptr<IDac>(dac.get(), [](IDac*){});
+                            active_.store(dac.get(), std::memory_order_release);
                             log::info("DacManager: opened and activated '%s'", type);
                             goto done_scan;
                         }
@@ -244,13 +316,17 @@ void DacManager::promote_best_candidate() {
         for (auto& dac : candidates_) {
             if (std::string(dac->type_name()) != type) continue;
             if (dac->is_open()) {
-                active_.store(dac.get());
+                // BUG #6 + BUG #35: update active_sp_ under candidates_mutex_
+                // (caller holds it) then store the fast-path atomic pointer.
+                active_sp_ = std::shared_ptr<IDac>(dac.get(), [](IDac*){});
+                active_.store(dac.get(), std::memory_order_release);
                 log::info("DacManager: promoted '%s' as active DAC", type);
                 return;
             }
             dac->set_point_rate(point_rate_);
             if (dac->open()) {
-                active_.store(dac.get());
+                active_sp_ = std::shared_ptr<IDac>(dac.get(), [](IDac*){});
+                active_.store(dac.get(), std::memory_order_release);
                 log::info("DacManager: opened and promoted '%s'", type);
                 return;
             }
@@ -302,7 +378,21 @@ void DacManager::output_thread_fn() {
     auto last_frame_time = Clock::now();
 
     while (running_.load()) {
-        IDac* dac = active_.load();
+        // Heartbeat: stamp the current time so is_healthy() can detect a stuck thread.
+        {
+            int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                Clock::now().time_since_epoch()).count();
+            last_loop_ms_.store(now_ms, std::memory_order_relaxed);
+        }
+
+        // BUG #6: Obtain a shared_ptr ref under the mutex so the DAC object
+        // cannot be destroyed while we are in send_points() below.
+        std::shared_ptr<IDac> dac_ref;
+        {
+            std::lock_guard<std::mutex> lk(candidates_mutex_);
+            dac_ref = active_sp_;
+        }
+        IDac* dac = dac_ref.get();
 
         // Poll for the next render frame
         const RenderFrame* frame = bus_.poll_dac();
@@ -436,6 +526,10 @@ void DacManager::force_dac(const std::string& type, const std::string& address) 
         forced_type_    = type;
         forced_address_ = address;
     }
+    // BUG #34: The output thread may observe active_=nullptr for one or more
+    // output cycles while the scan thread processes the flag and installs the
+    // new DAC.  This is intentional — the output thread already guards all
+    // sends with `if (dac && dac->is_open())` so the null window is safe.
     force_flag_.store(true, std::memory_order_release);
 }
 
@@ -447,6 +541,24 @@ double DacManager::last_mean_latency_ms() const {
 double DacManager::last_p99_latency_ms() const {
     std::lock_guard<std::mutex> lk(stats_mutex_);
     return latency_.p99();
+}
+
+bool DacManager::is_healthy(int64_t timeout_ms) const {
+    if (!running_.load(std::memory_order_acquire)) return false;
+    int64_t last = last_loop_ms_.load(std::memory_order_relaxed);
+    int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (last == 0) {
+        // Output thread has not yet completed its first iteration.
+        // Grant a 3× grace period from when start() was called so that the
+        // EtherDream scan, HIDAPI enumeration, and sidecar opens (which can
+        // collectively take 5–10 s with 8 concurrent managers) don't trigger
+        // a false-positive eviction by check_output_health.
+        int64_t started = started_at_ms_.load(std::memory_order_relaxed);
+        if (started == 0) return true;  // start() not yet fully entered
+        return (now_ms - started) < (timeout_ms * 3);
+    }
+    return (now_ms - last) < timeout_ms;
 }
 
 } // namespace idhmfis

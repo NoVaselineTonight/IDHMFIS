@@ -37,6 +37,9 @@ float BlockScatter::noise(uint32_t idx, uint32_t seed) {
 
 void BlockScatter::process(PointBuffer& buf, float dt, const ExprContext& /*ctx*/) {
     anim_t_ += dt;
+    // Wrap at 65536 to prevent float precision loss while keeping sin() phase continuous
+    // (65536 is a power-of-2 so fmod is exact and sin phase is preserved for any speed)
+    if (anim_t_ > 65536.f) anim_t_ -= 65536.f;
     const float amount  = p_amount_.effective();
     const float speed   = p_speed_.effective();
     const uint32_t seed = static_cast<uint32_t>(std::round(p_seed_.effective()));

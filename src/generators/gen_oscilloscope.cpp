@@ -12,6 +12,7 @@
 #include "../core/types.h"
 #include <cmath>
 #include <algorithm>
+#include <mutex>
 
 namespace idhmfis {
 
@@ -19,6 +20,7 @@ namespace idhmfis {
 // Updated by ShowEngine::build_frame() immediately before calling generators.
 // Audio-reactive generators read this without locking (acceptable for live viz).
 AudioSnapshot g_last_audio_snap;
+extern std::mutex g_audio_snap_mtx;
 
 class GenOscilloscope final : public IGenerator {
 public:
@@ -42,7 +44,7 @@ public:
         if      (p.param_b > 0.66f) mode = 2; // vectorscope
         else if (p.param_b > 0.33f) mode = 1; // spectrum
 
-        int n = p.point_count;
+        int n = std::max(2, p.point_count);
         static constexpr int kBins = AudioSnapshot::kFFTBins;
 
         if (mode == 0)

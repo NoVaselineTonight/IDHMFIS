@@ -2,7 +2,11 @@
 //
 // param_a : x1 endpoint  (0..1 → -1..1, default 0.1 → -0.8)
 // param_b : x2 endpoint  (0..1 → -1..1, default 0.9 →  0.8)
-// param_c : scan_speed   (0..1 → 0.1..20 Hz); scan_mode enabled when > 0
+// param_c : scan_speed   (0..1); scan enabled when >= 0.5
+//           speed maps [0.5..1.0] → [0.1..20 Hz] so the default value of 0.5
+//           produces a barely-perceptible 0.1 Hz sweep (not the old abrupt
+//           10 Hz that triggered "artificial scan FX" complaints).
+//           Set param_c < 0.5 to disable scan completely.
 // rotation: encodes y position of both endpoints as a single tilt
 //           (actual y1/y2 are both = tilt, i.e. horizontal line by default)
 //           → y offset of endpoints: tilt ± pan
@@ -23,7 +27,7 @@ public:
     const char* display_name()  const override { return "Line"; }
     const char* param_a_label() const override { return "X Start (0=left)"; }
     const char* param_b_label() const override { return "X End (1=right)"; }
-    const char* param_c_label() const override { return "Scan Speed"; }
+    const char* param_c_label() const override { return "Scan Speed (>=0.5=on)"; }
 
     PointBuffer generate(const GeneratorParams& p, double t) const override
     {
@@ -39,9 +43,13 @@ public:
         float y1 = p.tilt - p.pan;
         float y2 = p.tilt + p.pan;
 
-        // Scan mode: param_c > 0 → sweep line back and forth
-        if (p.param_c > 0.001f) {
-            float scan_speed = 0.1f + p.param_c * 19.9f;  // 0.1..20 Hz
+        // Scan mode: param_c >= 0.5 → sweep line back and forth.
+        // Speed is remapped from [0.5..1.0] → [0.1..20 Hz] so the default
+        // param_c of 0.5 produces a very slow sweep rather than an aggressive
+        // one; users set param_c < 0.5 to disable scan entirely.
+        if (p.param_c >= 0.5f) {
+            float t_scan     = (p.param_c - 0.5f) * 2.f;           // [0..1]
+            float scan_speed = 0.1f + t_scan * 19.9f;               // [0.1..20] Hz
             float phase = static_cast<float>(t) * scan_speed * 2.f * 3.14159265f * p.speed;
             float sweep = std::sin(phase); // -1..1
             // Animate x offset by sweeping the whole line segment

@@ -63,16 +63,37 @@ BamProcessor::BamProcessor()
 
 void BamProcessor::rebuild_cache()
 {
+    // H-13: Build into a local buffer first so the engine thread can keep reading
+    // the old cache_ without stalling, then swap under the lock in one shot.
+    float tmp[BamGrid::kSize][BamGrid::kSize];
+
     // Start from the BAM grid values
     for (int r = 0; r < BamGrid::kSize; ++r)
         for (int c = 0; c < BamGrid::kSize; ++c)
-            cache_[r][c] = static_cast<float>(grid_.cells[r][c]) / 255.f;
+            tmp[r][c] = static_cast<float>(grid_.cells[r][c]) / 255.f;
 
     // Rasterize each enabled safety zone (takes the minimum — most restrictive wins)
     for (const SafetyZone& z : zones_) {
-        if (z.enabled && !z.polygon.empty())
-            rasterize_zone(z);
+        if (z.enabled && !z.polygon.empty()) {
+            float zone_atten = std::clamp(z.attenuation, 0.f, 1.f);
+            int n = static_cast<int>(z.polygon.size());
+            if (n < 3) continue;
+            for (int row = 0; row < BamGrid::kSize; ++row) {
+                for (int col = 0; col < BamGrid::kSize; ++col) {
+                    float cx = (static_cast<float>(col) / static_cast<float>(BamGrid::kSize - 1)) * 2.f - 1.f;
+                    float cy = (static_cast<float>(row) / static_cast<float>(BamGrid::kSize - 1)) * 2.f - 1.f;
+                    if (point_in_polygon(cx, cy, z.polygon)) {
+                        if (zone_atten < tmp[row][col])
+                            tmp[row][col] = zone_atten;
+                    }
+                }
+            }
+        }
     }
+
+    // Commit atomically: hold the lock only for the memcpy
+    std::lock_guard<std::mutex> lk(cache_mtx_);
+    std::memcpy(cache_, tmp, sizeof(cache_));
 }
 
 void BamProcessor::apply(PointBuffer& buf) const
@@ -80,14 +101,25 @@ void BamProcessor::apply(PointBuffer& buf) const
     if (!enabled)
         return;
 
+    // H-13: Take a snapshot of the cache under the lock so we read a consistent
+    // version even if rebuild_cache() is running concurrently on the UI thread.
+    float local_cache[BamGrid::kSize][BamGrid::kSize];
+    {
+        std::lock_guard<std::mutex> lk(cache_mtx_);
+        std::memcpy(local_cache, cache_, sizeof(local_cache));
+    }
+
     for (LaserPoint& pt : buf) {
-        // Only process lit points
+        // Only process lit points (blanked points are already off at the DAC).
         if (pt.blanked)
             continue;
 
-        // A point with all-zero colour is effectively off; skip it
-        if (pt.r == 0 && pt.g == 0 && pt.b == 0)
-            continue;
+        // SAFETY INVARIANT: do NOT skip zero-colour points here.
+        // BAM enforcement is position-based, not colour-based.  A point can
+        // have zero colour for many reasons (upstream dimming, generator bug,
+        // etc.) and may still be physically illuminated or amplified by
+        // downstream per-output boost.  Any non-blanked point in a blocked
+        // cell MUST be blanked regardless of its current colour values.
 
         float nx = pt.nx();
         float ny = pt.ny();
@@ -98,7 +130,7 @@ void BamProcessor::apply(PointBuffer& buf) const
         int col = std::clamp(static_cast<int>(fx), 0, BamGrid::kSize - 1);
         int row = std::clamp(static_cast<int>(fy), 0, BamGrid::kSize - 1);
 
-        float atten = cache_[row][col];
+        float atten = local_cache[row][col];
 
         if (atten < 0.01f) {
             // Full block — blank the point
@@ -146,24 +178,16 @@ bool BamProcessor::point_in_polygon(float x, float y,
     return inside;
 }
 
+// BUG #31 fix: DEAD CODE — rasterize_zone() writes directly to cache_[][] without
+// holding cache_mtx_, creating a data race with apply() which reads cache_ from the
+// engine thread. Do NOT call this function directly from outside rebuild_cache().
+// rebuild_cache() correctly writes to a local tmp[] buffer and commits under the lock.
+// This function is retained (not deleted) only to avoid ABI breakage if headers
+// outside this TU have taken its address, but it must never be called in practice.
 void BamProcessor::rasterize_zone(const SafetyZone& z)
 {
-    float zone_atten = std::clamp(z.attenuation, 0.f, 1.f);
-
-    // Walk every cell and test whether its centre lies inside the polygon
-    for (int r = 0; r < BamGrid::kSize; ++r) {
-        for (int c = 0; c < BamGrid::kSize; ++c) {
-            // Cell centre in normalized coordinates
-            float cx = (static_cast<float>(c) / static_cast<float>(BamGrid::kSize - 1)) * 2.f - 1.f;
-            float cy = (static_cast<float>(r) / static_cast<float>(BamGrid::kSize - 1)) * 2.f - 1.f;
-
-            if (point_in_polygon(cx, cy, z.polygon)) {
-                // Most restrictive wins: take minimum attenuation
-                if (zone_atten < cache_[r][c])
-                    cache_[r][c] = zone_atten;
-            }
-        }
-    }
+    (void)z;
+    // Intentionally a no-op. Use rebuild_cache() instead.
 }
 
 } // namespace idhmfis

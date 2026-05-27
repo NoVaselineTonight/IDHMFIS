@@ -238,6 +238,7 @@ struct UIState {
 
     // ── Per-playback configuration (PBCONF popup) ─────────────────────────────
     struct PlaybackConf {
+        std::string name;             // display name (editable in PBCONF popup)
         enum class DmxMode { Off, OneChannel, TwoChannel } dmx_mode = DmxMode::Off;
         int  dmx_universe  = 0;
         int  dmx_channel   = 1;
@@ -273,6 +274,13 @@ struct UIState {
     ColorInputMode color_input_mode = ColorInputMode::RGBPercent;
     bool color_settings_open = false;   // floating color settings window
 
+    // ── Timing display format (fade in, fade out, hold columns) ──────────────
+    // Seconds  — "1.25 s"  (default)
+    // BPM      — "2.50 bt" beat count relative to current BPM
+    // MMSSMS   — "00:01.250" (MM:SS.ms)
+    enum class TimingDisplayMode { Seconds, BPM, MMSSMS };
+    TimingDisplayMode timing_display_mode = TimingDisplayMode::Seconds;
+
     // ── Color swatches: 8 default + 24 custom recordable slots ────────────────
     static constexpr int kNumSwatches = 32;
     struct ColorSwatch {
@@ -300,7 +308,9 @@ struct UIState {
         std::string iface_ip_display;             // current IP string shown in the UI (read-only display)
 
         // ── ArtNet input ────────────────────────────────────────────────────────
-        bool        artnet_enabled      = false;
+        // Default to enabled: the listener starts unconditionally at launch so
+        // Chamsys / grandMA on the same LAN are visible from the first frame.
+        bool        artnet_enabled      = true;
         bool        artnet_auto         = true;
         int         artnet_universe     = 0;
         int         artnet_net          = 0;
@@ -365,8 +375,24 @@ struct UIState {
         std::string ndi_net_source_name = "IDHMFIS Laser Preview";
         int         ndi_net_bandwidth   = 1;   // 0=Low, 1=High Quality
         int         ndi_net_fps         = 30;
+
+        // ── DMX universe base offset ─────────────────────────────────────────────
+        // 0 = no adjustment (default).  Shifts the universe used in playback trigger
+        // lookups.  Use -1 if your project stores universe 1 but Art-Net arrives on 0.
+        int         dmx_universe_offset  = 0;
     };
     NetworkConfig net_config;
+
+    // ── ArtNet input live status (NOT persisted — updated every UI frame) ────────
+    // Written from the UI-thread InputRouter owner; read by panel_setup to render
+    // the status row without any locking (all atomic reads underneath).
+    struct ArtNetInputStatus {
+        bool     running         = false;
+        uint64_t packets         = 0;
+        double   last_age_ms     = -1.0;  // ms since last ArtDMX packet; -1 = never
+        int      active_universes= 0;
+    };
+    ArtNetInputStatus artnet_input_status;
 
     // ── NDI / Output configuration ─────────────────────────────────────────────
     struct OutputConfig {
@@ -398,6 +424,17 @@ struct UIState {
         bool        stream_type_ndi_enabled    = true;
         bool        stream_type_artnet_enabled = true;
         bool        stream_type_idn_enabled    = true;
+
+        // ── Laser Output Quality (sent to engine as SetOptimizerConfig) ──────────
+        // Controls the 7-step PointOptimizer pipeline that shapes the galvo scan.
+        // Increasing dwell counts smooths scan artifacts; reducing them raises speed.
+        int   opt_target_pps             = 30000;  // point rate sent to DAC
+        float opt_blank_dwell            = 8.f;    // settle points at blank→lit transitions
+        float opt_corner_dwell           = 3.f;    // settle points at sharp corners
+        float opt_corner_angle_threshold = 0.3f;   // radians; corners sharper than this get dwell
+        bool  opt_enable_reorder         = true;   // nearest-neighbour path reorder
+        bool  opt_enable_overscan_clip   = true;   // hard-clip at ±(1 + overscan_margin)
+        float opt_overscan_margin        = 0.05f;  // extra margin for overscan clip
     };
     OutputConfig output_config;
 
@@ -489,6 +526,14 @@ struct UIState {
         float haze_alpha       = 0.35f;   // projector-to-wall haze beam alpha (0..1)
         float wall_glow_px     = 5.f;     // outer glow radius on wall hit (px)
         float beam_width_px    = 1.5f;    // solid wall segment width (px)
+        // Room dimensions (metres)
+        float room_half_width  = 6.f;    // half-width of room (wall is ±room_half_width)
+        float room_height      = 5.f;    // floor-to-ceiling height
+        float room_depth       = 20.f;   // depth of room (front to back wall)
+        // Projection — half-size (metres) of the laser output on the back wall.
+        // The laser scan field is square: output spans ±proj_scale in both X and Y,
+        // centered at mid-wall height.  Set equal to maintain 1:1 aspect ratio.
+        float proj_scale       = 3.0f;
     };
     Preview3dSettings preview_3d;
 

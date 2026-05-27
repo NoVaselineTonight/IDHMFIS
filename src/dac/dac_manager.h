@@ -53,6 +53,20 @@ public:
     // True if both background threads are running (set by start(), cleared by stop()).
     bool is_running() const { return running_.load(std::memory_order_acquire); }
 
+    // True if the output thread has ticked within the last timeout_ms milliseconds.
+    // Returns true while the manager is still starting (last_loop_ms_ == 0) to avoid
+    // false positives during the probe/connect phase.
+    bool is_healthy(int64_t timeout_ms = 3000) const;
+
+    // Clear the stop_requested_ flag so a restarted manager can call start() again.
+    // Only call this when you own the last reference and intend to re-use the object.
+    void clear_stop_requested() { stop_requested_.store(false, std::memory_order_release); }
+
+    // Bus slot index this manager was constructed for (0 = main bus,
+    // 1 = extra_laser_buses_[0], etc.).  Exposed so the engine can detect
+    // stale bus assignments when output streams are reordered.
+    int ordinal() const { return stream_idx_; }
+
     // Change the output point rate across all candidates.
     void set_point_rate(int pps);
 
@@ -95,11 +109,24 @@ private:
     mutable std::mutex            candidates_mutex_;
     std::vector<std::unique_ptr<IDac>> candidates_;
 
-    // Active DAC is a raw pointer into candidates_ (never owns memory).
-    // Written only by scan_thread; read by output_thread.
-    std::atomic<IDac*>            active_{ nullptr };
+    // Active DAC lifetime management (BUG #6):
+    //   active_sp_ is a shared_ptr that extends DAC object lifetime while the
+    //   output thread holds a local copy.  Written only under candidates_mutex_.
+    //   active_ is a fast-path atomic hint; the output thread must obtain
+    //   active_sp_ under candidates_mutex_ to get a safe, reference-counted handle.
+    std::shared_ptr<IDac>         active_sp_;         // guarded by candidates_mutex_
+    std::atomic<IDac*>            active_{ nullptr };  // fast-path hint (not safe alone)
 
     std::atomic<bool>             running_{ false };
+    // Set by stop() (under lifecycle_mutex_) before returning.
+    // Checked by start() (under lifecycle_mutex_) to prevent thread creation when
+    // stop() already ran — guards the window where a stop thread deletes the manager
+    // while a start thread has been launched but not yet entered start().
+    std::atomic<bool>             stop_requested_{ false };
+    // Serialises start() against stop(): start() holds this for its entire body
+    // so stop() cannot proceed (and the manager cannot be deleted) until start()
+    // has finished creating scan_thread_ and output_thread_.
+    std::mutex                    lifecycle_mutex_;
     std::thread                   scan_thread_;
     std::thread                   output_thread_;
 
@@ -112,6 +139,16 @@ private:
     // Last known good frame — replayed when buffer is hungry (keep-alive)
     PointBuffer                   last_frame_;
     mutable std::mutex            last_frame_mutex_;
+
+    // Heartbeat: output_thread_fn() writes the current epoch-ms at the top of
+    // every loop iteration.  is_healthy() reads it to detect a stuck thread.
+    std::atomic<int64_t>          last_loop_ms_{ 0 };
+
+    // start() epoch-ms stamp: set once when start() begins creating threads.
+    // is_healthy() uses this to grant a grace period (3× timeout_ms) while the
+    // output thread hasn't yet executed its first iteration — the window between
+    // start() returning and last_loop_ms_ first being written by the output thread.
+    std::atomic<int64_t>          started_at_ms_{ 0 };
 
     // Forced-DAC override
     std::string                   forced_type_;

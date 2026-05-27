@@ -182,10 +182,17 @@ void LtcDecoder::process(const int8_t* samples, int count) {
         int8_t s = samples[i];
         ++samples_since_zc_;
 
-        // Detect zero-crossing (sign change from non-zero)
+        // Detect zero-crossing with hysteresis (L-15).
+        // The original comparison (s <= 0 / s >= 0) includes the zero value on
+        // both sides, so a near-zero input bouncing around 0 produces multiple
+        // spurious crossings per half-cell.  Require the new sample to cross a
+        // small dead-band (±3 out of ±127, ~2.4%) before declaring a crossing.
+        // The threshold is small enough to be invisible at any real LTC level
+        // but large enough to reject 8-bit ADC noise around zero.
+        static constexpr int8_t kHyst = 3;
         bool zc = false;
-        if (last_sample_ > 0 && s <= 0) zc = true;
-        else if (last_sample_ < 0 && s >= 0) zc = true;
+        if (last_sample_ > kHyst  && s < -kHyst) zc = true;
+        else if (last_sample_ < -kHyst && s > kHyst)  zc = true;
 
         if (zc) {
             int interval = samples_since_zc_;
@@ -252,12 +259,11 @@ void LtcDecoder::on_bit(int bit) {
             try_decode_frame();
             bit_count_ = 0;
         } else if (match && base != 64) {
-            // Sync found but not at expected position — resync: keep the
-            // 80 bits ending here as a fresh frame candidate
-            if (base + 16 >= kBitsPerFrame) {
-                // We have a full frame's worth; decode what we have
-                try_decode_frame();
-            }
+            // BUG #19 fix: sync found but not at the expected position (base != 64)
+            // means the 64 data bits preceding the sync word are not correctly
+            // aligned in bit_buf_, so calling try_decode_frame() here would
+            // extract garbage fields.  Skip the decode and just reset the
+            // bit counter to re-sync on the next incoming frame.
             bit_count_ = 0;
         }
     }
@@ -342,19 +348,36 @@ void TimecodeRouter::on_artnet_tc(const TimecodeState& tc) {
 }
 
 void TimecodeRouter::feed_mtc(uint8_t qf_byte) {
+    // Remember the frame counter before feeding so we can detect a new decode.
+    bool was_valid = mtc_.state().valid;
+    int64_t old_frames = was_valid ? mtc_.state().total_frames() : -1;
+
     mtc_.feed_quarter_frame(qf_byte);
-    mtc_updated_ns_.store(now_ns(), std::memory_order_release);
+
+    // Only advance the timestamp when a new complete frame has been assembled.
+    // Updating on every quarter-frame would make the source appear fresh even
+    // when only 1-of-8 pieces have arrived, keeping a stale timecode value live.
+    TimecodeState s = mtc_.state();
+    if (s.valid && s.total_frames() != old_frames) {
+        mtc_updated_ns_.store(now_ns(), std::memory_order_release);
+    }
 }
 
 void TimecodeRouter::feed_ltc(const int8_t* samples, int count, int /*sample_rate*/) {
+    TimecodeState before = ltc_.state();
+    int64_t old_frames = before.valid ? before.total_frames() : -1;
     ltc_.process(samples, count);
-    if (ltc_.state().valid)
+    TimecodeState after = ltc_.state();
+    if (after.valid && after.total_frames() != old_frames)
         ltc_updated_ns_.store(now_ns(), std::memory_order_release);
 }
 
 void TimecodeRouter::feed_ltc_f32(const float* samples, int count, int /*sample_rate*/) {
+    TimecodeState before = ltc_.state();
+    int64_t old_frames = before.valid ? before.total_frames() : -1;
     ltc_.process_f32(samples, count);
-    if (ltc_.state().valid)
+    TimecodeState after = ltc_.state();
+    if (after.valid && after.total_frames() != old_frames)
         ltc_updated_ns_.store(now_ns(), std::memory_order_release);
 }
 

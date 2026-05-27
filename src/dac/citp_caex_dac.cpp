@@ -730,6 +730,12 @@ void CitpCaexDac::handle_client(CitpSocket client) {
             log::warn("CITP/CAEX: MessageSize %u too small", total_size);
             break;
         }
+        // BUG #68: Reject packets whose declared size would cause an enormous
+        // allocation (e.g. a malformed/malicious peer sending 4 GB).
+        if (total_size > 1024u * 1024u) { // 1 MB cap
+            log::warn("CITP/CAEX: packet too large (%u bytes), dropping", total_size);
+            break;
+        }
 
         uint32_t body_size = total_size - static_cast<uint32_t>(sizeof(CitpHeader));
         std::vector<uint8_t> body(body_size);
@@ -750,9 +756,11 @@ void CitpCaexDac::handle_client(CitpSocket client) {
                 uint32_t sub = 0;
                 std::memcpy(&sub, body.data(), 4);
                 if (sub == kCitpPNamCode) {
-                    // Read Capture's name — it follows the sub content type
-                    // Just log it; body[4..] is null-terminated UTF-8
+                    // Read Capture's name — it follows the sub content type.
+                    // BUG #67: body is received from the network and may not be
+                    // null-terminated.  Append a null byte before treating as C-string.
                     if (body_size > 4) {
+                        body.push_back(0); // ensure null termination
                         const char* cname = reinterpret_cast<const char*>(body.data() + 4);
                         log::info("CITP/CAEX: peer name = '%s'", cname);
                     }
@@ -1100,6 +1108,12 @@ uint16_t CitpCaexDac::rgb888_to_r5g6b5(uint8_t r, uint8_t g, uint8_t b) {
 //    PointCount × CaexPoint (5 bytes each)
 // ─────────────────────────────────────────────────────────────────────────────
 std::vector<uint8_t> CitpCaexDac::build_frame(const PointBuffer& pts) {
+    // BUG #32: Verify that CitpCaexHeader is exactly CitpHeader + 4 bytes
+    // (the CAEX content-type code field) so pointer arithmetic in this function
+    // is correct.  Mismatched struct packing would silently corrupt the wire format.
+    static_assert(sizeof(CitpCaexHeader) == sizeof(CitpHeader) + sizeof(uint32_t),
+        "CitpCaexHeader size mismatch — check struct packing");
+
     uint16_t count = static_cast<uint16_t>(
         std::min<size_t>(pts.size(), 0xFFFFu));
 

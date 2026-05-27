@@ -8,6 +8,7 @@
 
 #include "igenerator.h"
 #include <cmath>
+#include <algorithm>
 
 namespace idhmfis {
 
@@ -33,7 +34,7 @@ public:
         Color4 ca = p.color_a;
         Color4 cb = p.color_b;
 
-        int n = p.point_count;
+        int n = std::max(2, p.point_count);
 
         for (int i = 0; i < n; ++i)
         {

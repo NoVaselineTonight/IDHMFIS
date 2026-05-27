@@ -127,6 +127,9 @@ private:
     std::vector<Client>       clients_;
 
     std::atomic<bool>  running_{ false };
+    // H-22: guard against concurrent calls to close() racing through the two
+    // separate lock sections and the thread-join gap between them.
+    std::atomic<bool>  closing_{ false };
     std::thread        accept_thread_;
     std::thread        hello_thread_;
 };

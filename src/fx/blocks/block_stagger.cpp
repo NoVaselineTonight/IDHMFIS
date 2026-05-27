@@ -30,6 +30,8 @@ static uint32_t lcg(uint32_t x) {
 
 void BlockStagger::process(PointBuffer& buf, float dt, const ExprContext& /*ctx*/) {
     anim_t_ += dt;
+    // Wrap frequently; used as fmod(..., 1.f) source so any power-of-2 wrap preserves phase
+    if (anim_t_ > 1024.f) anim_t_ -= 1024.f;
 
     const float speed      = p_speed_.effective();
     const float phase_off  = p_phase_.effective();

@@ -72,7 +72,6 @@ namespace idhmfis {
 // ─────────────────────────────────────────────────────────────────────────────
 VirtualCamera::VirtualCamera() {
     rgb_.assign(static_cast<size_t>(kWidth * kHeight * 3), 0u);
-    bgra_.assign(static_cast<size_t>(kWidth * kHeight * 4), 0u);
 }
 
 VirtualCamera::~VirtualCamera() {
@@ -87,16 +86,13 @@ bool VirtualCamera::open() {
 
     // Build indexed names for multi-stream support.
     // Stream 0: canonical names from camera_shm.h constants.
-    // Stream N>0: append N as suffix so each instance has unique SHM/mutex/NDI names.
+    // Stream N>0: append N as suffix so each instance has unique SHM/mutex names.
     const std::wstring shm_name = (stream_index_ == 0)
         ? std::wstring(kCamShmName)
         : std::wstring(kCamShmName) + std::to_wstring(stream_index_);
     const std::wstring mutex_name = (stream_index_ == 0)
         ? std::wstring(kCamMutexName)
         : std::wstring(kCamMutexName) + std::to_wstring(stream_index_);
-    const std::string ndi_name = (stream_index_ == 0)
-        ? std::string(kCamFriendlyName)
-        : std::string(kCamFriendlyName) + " " + std::to_string(stream_index_ + 1);
 
     // Create named shared memory.
     shm_handle_ = CreateFileMappingW(
@@ -139,25 +135,13 @@ bool VirtualCamera::open() {
 
     open_.store(true);
 
-    // Try NDI output first — no admin or COM registration required.
-    // Each stream gets a unique NDI source name so consumers can pick individual lasers.
-    bool ndi_ok = ndi_sender_.init(ndi_name.c_str(),
-                                   kWidth, kHeight, kFPS, 1,
-                                   /*bgra=*/true, /*clock_video=*/false);
-    if (ndi_ok) {
-        log::info("VirtualCamera[%d]: NDI output active — source '%s' %dx%d@%d",
-                  stream_index_, ndi_name.c_str(), kWidth, kHeight, kFPS);
-    } else if (stream_index_ == 0) {
-        // MF virtual camera fallback only makes sense for the primary stream
-        // (it uses the fixed COM registration).
-        log::warn("VirtualCamera: NDI not available — trying MF virtual camera");
+    // Start MF virtual camera (Win11+) for primary stream so the device appears
+    // in Windows camera / video-capture enumerators.
+    if (stream_index_ == 0) {
         start_mf_virtual_camera();
-    } else {
-        log::warn("VirtualCamera[%d]: NDI not available — no capture fallback for secondary streams",
-                  stream_index_);
     }
 
-    log::info("VirtualCamera[%d]: opened — '%s'", stream_index_, ndi_name.c_str());
+    log::info("VirtualCamera[%d]: opened (SHM+DirectShow path)", stream_index_);
     return true;
 }
 
@@ -167,9 +151,6 @@ bool VirtualCamera::open() {
 void VirtualCamera::close() {
     if (!open_.load()) return;
     open_.store(false);
-
-    // Shutdown NDI sender
-    ndi_sender_.shutdown();
 
     // Stop MF virtual camera before unmapping SHM
     stop_mf_virtual_camera();
@@ -216,29 +197,22 @@ void VirtualCamera::push_frame(const PointBuffer& pts) {
     rasterise(pts);
 
     // Write to SHM under named mutex so the DLL reader doesn't get a torn frame.
+    // BUG #26 fix: sequence counter must be incremented INSIDE the mutex so the
+    // consumer cannot observe the incremented counter before the payload is written.
+    // Previously the increment was outside the mutex, creating a write-ordering race
+    // where the DLL could read a new sequence number but still see old frame data.
     if (cam_mutex_) {
         WaitForSingleObject(cam_mutex_, INFINITE);
-    }
-    std::memcpy(shm_view_->data, rgb_.data(), static_cast<size_t>(kCamFrameBytes));
-    if (cam_mutex_) {
+        std::memcpy(shm_view_->data, rgb_.data(), static_cast<size_t>(kCamFrameBytes));
+        // Increment inside the lock, after payload is fully written.
+        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&shm_view_->sequence));
         ReleaseMutex(cam_mutex_);
+    } else {
+        // No mutex available (open() warned about this) — best-effort write.
+        std::memcpy(shm_view_->data, rgb_.data(), static_cast<size_t>(kCamFrameBytes));
+        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&shm_view_->sequence));
     }
 
-    // Signal a new frame is available.  InterlockedIncrement is an acquire/release
-    // fence on x86, ensuring the consumer sees the complete data[] write.
-    InterlockedIncrement(reinterpret_cast<volatile LONG*>(&shm_view_->sequence));
-
-    // NDI output: convert BGR24 → BGRA and send
-    if (ndi_sender_.is_initialized()) {
-        const int npix = kWidth * kHeight;
-        for (int i = 0; i < npix; ++i) {
-            bgra_[static_cast<size_t>(i * 4 + 0)] = rgb_[static_cast<size_t>(i * 3 + 0)]; // B
-            bgra_[static_cast<size_t>(i * 4 + 1)] = rgb_[static_cast<size_t>(i * 3 + 1)]; // G
-            bgra_[static_cast<size_t>(i * 4 + 2)] = rgb_[static_cast<size_t>(i * 3 + 2)]; // R
-            bgra_[static_cast<size_t>(i * 4 + 3)] = 255u;
-        }
-        ndi_sender_.send_bgra(bgra_.data(), kWidth, kHeight, 0);
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

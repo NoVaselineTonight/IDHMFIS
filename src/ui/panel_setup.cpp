@@ -99,6 +99,7 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
     // ── Tab 1: Output (first — most-used during a show) ───────────────────
     if (ImGui::BeginTabItem("Output"))
     {
+        ImGui::BeginChild("##output_scroll", ImVec2(0.f, 0.f), false, ImGuiWindowFlags_None);
         ImDrawList* dl_out = ImGui::GetWindowDrawList();
 
         ImGui::Spacing();
@@ -259,6 +260,109 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
         }
 
         ImGui::Spacing();
+
+        // ── Laser Output Quality ───────────────────────────────────────────────
+        ImGui::SeparatorText("Laser Output Quality");
+        ImGui::SetItemTooltip(
+            "Controls the 7-step PointOptimizer pipeline that shapes the galvo scan.\n"
+            "Higher dwell counts smooth out mirror overshoot and color flicker\n"
+            "at the cost of slightly fewer unique points per frame.\n"
+            "Click Apply to push changes to the engine.");
+        ImGui::Spacing();
+
+        ImGui::BeginGroup();
+        ImVec2 grp_laser_min = ImGui::GetCursorScreenPos();
+
+        // Point Rate
+        ImGui::Text("Point Rate:");
+        ImGui::SameLine(210.f);
+        ImGui::SetNextItemWidth(180.f);
+        ImGui::SliderInt("##lq_pps", &state.output_config.opt_target_pps,
+                         8000, 60000, "%d pps");
+        ImGui::SetItemTooltip(
+            "Points per second sent to the DAC / output bus.\n"
+            "8k-20k: smooth, slower images.  30k: balanced default.\n"
+            "50k-60k: fast but requires a high-speed DAC.");
+        if (state.output_config.opt_target_pps < 8000)  state.output_config.opt_target_pps = 8000;
+        if (state.output_config.opt_target_pps > 60000) state.output_config.opt_target_pps = 60000;
+
+        ImGui::Spacing();
+
+        // Blank Dwell
+        ImGui::Text("Blank Dwell:");
+        ImGui::SameLine(210.f);
+        ImGui::SetNextItemWidth(180.f);
+        ImGui::SliderFloat("##lq_bd", &state.output_config.opt_blank_dwell, 0.f, 30.f, "%.0f pts");
+        ImGui::SetItemTooltip(
+            "Extra settle points inserted whenever the beam transitions\n"
+            "from blanked (travelling) to lit.\n"
+            "Too low: visible ghost lines.  Too high: lower effective draw rate.\n"
+            "Default 8.  Increase to 12-20 for cheap/slow mirrors.");
+        if (state.output_config.opt_blank_dwell < 0.f)  state.output_config.opt_blank_dwell = 0.f;
+        if (state.output_config.opt_blank_dwell > 30.f) state.output_config.opt_blank_dwell = 30.f;
+
+        ImGui::Spacing();
+
+        // Corner Dwell
+        ImGui::Text("Corner Dwell:");
+        ImGui::SameLine(210.f);
+        ImGui::SetNextItemWidth(180.f);
+        ImGui::SliderFloat("##lq_cd", &state.output_config.opt_corner_dwell, 0.f, 20.f, "%.0f pts");
+        ImGui::SetItemTooltip(
+            "Extra dwell points at sharp direction changes (corners).\n"
+            "Prevents rounding of corners caused by mirror inertia.\n"
+            "Default 3.  Increase to 5-10 for angular shapes like squares/stars.");
+        if (state.output_config.opt_corner_dwell < 0.f)  state.output_config.opt_corner_dwell = 0.f;
+        if (state.output_config.opt_corner_dwell > 20.f) state.output_config.opt_corner_dwell = 20.f;
+
+        ImGui::Spacing();
+
+        // Corner Angle Threshold
+        ImGui::Text("Corner Threshold:");
+        ImGui::SameLine(210.f);
+        ImGui::SetNextItemWidth(180.f);
+        ImGui::SliderFloat("##lq_cat", &state.output_config.opt_corner_angle_threshold,
+                           0.05f, 1.57f, "%.2f rad");
+        ImGui::SetItemTooltip(
+            "Minimum angle change (radians) that triggers corner dwell.\n"
+            "0.3 rad (~17\xc2\xb0) = default — only sharp corners.  \n"
+            "Lower = dwell on gentler curves too; higher = only very sharp turns.");
+
+        ImGui::Spacing();
+
+        // Reorder toggle
+        {
+            bool reorder = state.output_config.opt_enable_reorder;
+            if (ImGui::Checkbox("Segment Reorder##lq_ro", &reorder))
+                state.output_config.opt_enable_reorder = reorder;
+            ImGui::SetItemTooltip(
+                "Nearest-neighbour path reordering: sorts line segments to minimise\n"
+                "blank travel between shapes.  Almost always helps.  Disable only\n"
+                "if segment order must be preserved (e.g. ILDA file playback).");
+        }
+
+        ImGui::SameLine(210.f);
+
+        // Overscan clip toggle
+        {
+            bool osc = state.output_config.opt_enable_overscan_clip;
+            if (ImGui::Checkbox("Overscan Clip##lq_oc", &osc))
+                state.output_config.opt_enable_overscan_clip = osc;
+            ImGui::SetItemTooltip(
+                "Hard-clip points slightly outside the ±1 normalised boundary.\n"
+                "Prevents galvo runaway at the extreme edges of the scan field.");
+        }
+
+        ImGui::Spacing();
+        ImGui::EndGroup();
+        {
+            ImVec2 grp_laser_max = ImGui::GetItemRectMax();
+            grp_laser_max.x = ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x;
+            grp_laser_max.y += 4.f;
+            draw_group_border(dl_out, ImVec2(grp_laser_min.x - 4.f, grp_laser_min.y - 4.f), grp_laser_max);
+        }
+
+        ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
@@ -267,15 +371,19 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
                 cbs.on_setup_beam_params(ctx.beam_thickness,
                                          state.output_config.glow_radius,
                                          state.output_config.glow_alpha);
+            if (cbs.on_setup_laser_quality)
+                cbs.on_setup_laser_quality(state.output_config);
         }
-        ImGui::SetItemTooltip("Apply render settings to the output pipeline.");
+        ImGui::SetItemTooltip("Apply render and laser quality settings to the output pipeline.");
 
+        ImGui::EndChild();
         ImGui::EndTabItem();
     }
 
     // ── Tab 2: NDI Output ─────────────────────────────────────────────────
     if (ImGui::BeginTabItem("NDI Output"))
     {
+        ImGui::BeginChild("##ndi_scroll", ImVec2(0.f, 0.f), false, ImGuiWindowFlags_None);
         ImDrawList* dl_ndi = ImGui::GetWindowDrawList();
 
         ImGui::Spacing();
@@ -443,6 +551,7 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
         }
         ImGui::SetItemTooltip("Apply NDI configuration. Changes take effect on the next frame.");
 
+        ImGui::EndChild();
         ImGui::EndTabItem();
     }
 
@@ -527,32 +636,83 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
         ImGui::Spacing();
 
         {
+            // ── Live status row ────────────────────────────────────────────────
+            {
+                const auto& st = state.artnet_input_status;
+                // Dot colour: green=running+traffic, yellow=running+no traffic, grey=stopped
+                bool has_traffic = st.running && st.packets > 0 && st.last_age_ms >= 0.0
+                                   && st.last_age_ms < 5000.0;
+                ImU32 dot_col = st.running
+                    ? (has_traffic ? IM_COL32(50,220,90,255) : IM_COL32(220,180,50,255))
+                    : IM_COL32(80,85,95,255);
+                ImDrawList* dl_an = ImGui::GetWindowDrawList();
+                ImVec2 dot_pos = ImGui::GetCursorScreenPos();
+                float cy = dot_pos.y + ImGui::GetTextLineHeight() * 0.5f;
+                dl_an->AddCircleFilled(ImVec2(dot_pos.x + 6.f, cy), 6.f, dot_col);
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 16.f);
+
+                if (!st.running) {
+                    ImGui::TextDisabled("Listener: stopped");
+                } else if (st.packets == 0) {
+                    ImGui::TextDisabled("Listener: running — waiting for packets...");
+                } else {
+                    char age_buf[64];
+                    if (st.last_age_ms < 0.0)
+                        std::snprintf(age_buf, sizeof(age_buf), "never");
+                    else if (st.last_age_ms < 1500.0)
+                        std::snprintf(age_buf, sizeof(age_buf), "%.0f ms ago", st.last_age_ms);
+                    else
+                        std::snprintf(age_buf, sizeof(age_buf), "%.1f s ago",
+                                      st.last_age_ms * 0.001);
+                    ImGui::Text("Listener: ACTIVE  pkts=%llu  universes=%d  last=%s",
+                                static_cast<unsigned long long>(st.packets),
+                                st.active_universes, age_buf);
+                }
+                ImGui::Spacing();
+            }
+
             ImGui::Checkbox("Enable ArtNet Input##an_en", &nc.artnet_enabled);
-            ImGui::SetItemTooltip("Receive ArtNet DMX from any Art-Net 4 lighting controller.");
+            ImGui::SetItemTooltip(
+                "Receive ArtNet DMX from any Art-Net 4 lighting controller.\n"
+                "The listener starts automatically at launch on port 6454.\n"
+                "Use 'Apply All' to restart with custom settings.");
             ImGui::SameLine(0.f, 16.f);
             ImGui::Checkbox("Auto##an_auto", &nc.artnet_auto);
-            ImGui::SetItemTooltip("Auto: universe 0, net 0, subnet 0, listen 0.0.0.0:6454.");
+            ImGui::SetItemTooltip(
+                "Auto mode: binds 0.0.0.0:6454, Net=0, Subnet=0.\n"
+                "Works for Chamsys MagicQ on the same PC — MagicQ broadcasts\n"
+                "Art-Net on the local network adapter (not loopback); IDHMFIS\n"
+                "binds all-interfaces so it receives the packets even on the same PC.\n"
+                "Disable Auto to set a specific universe, net, or subnet.");
 
-            ImGui::BeginDisabled(!nc.artnet_enabled || nc.artnet_auto);
+            // Fields are only greyed when Auto is on — they remain editable even
+            // if the Enable checkbox is off so the user can configure before enabling.
+            ImGui::BeginDisabled(nc.artnet_auto);
 
+            // Row 1: Port-address fields (universe 0-15, net 0-127, subnet 0-15)
             ImGui::Text("Universe:"); ImGui::SameLine(120.f);
             ImGui::SetNextItemWidth(70.f);
             ImGui::InputInt("##an_uni", &nc.artnet_universe, 1, 10);
             if (nc.artnet_universe < 0)  nc.artnet_universe = 0;
             if (nc.artnet_universe > 15) nc.artnet_universe = 15;
+            ImGui::SetItemTooltip("Art-Net universe (bits 3-0 of 15-bit portAddress, 0-15).");
             ImGui::SameLine(0.f, 16.f);
             ImGui::Text("Net:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(60.f);
             ImGui::InputInt("##an_net", &nc.artnet_net, 1, 5);
             if (nc.artnet_net < 0)   nc.artnet_net = 0;
             if (nc.artnet_net > 127) nc.artnet_net = 127;
+            ImGui::SetItemTooltip("Art-Net net (bits 14-8 of portAddress, 0-127).");
             ImGui::SameLine(0.f, 16.f);
             ImGui::Text("Subnet:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(60.f);
             ImGui::InputInt("##an_sub", &nc.artnet_subnet, 1, 5);
             if (nc.artnet_subnet < 0)  nc.artnet_subnet = 0;
             if (nc.artnet_subnet > 15) nc.artnet_subnet = 15;
+            ImGui::SetItemTooltip("Art-Net subnet (bits 7-4 of portAddress, 0-15).\n"
+                                  "Chamsys default: Net=0, Subnet=0, Universe=0.");
 
+            // Row 2: Listen IP + port
             ImGui::Text("Listen IP:"); ImGui::SameLine(120.f);
             ImGui::SetNextItemWidth(160.f);
             {
@@ -562,13 +722,17 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
                 if (ImGui::InputText("##an_lip", buf, sizeof(buf)))
                     nc.artnet_listen_ip = buf;
             }
-            ImGui::SetItemTooltip("0.0.0.0 = listen on all interfaces.");
+            ImGui::SetItemTooltip(
+                "IP to bind for receiving ArtNet packets.\n"
+                "0.0.0.0 = all interfaces (recommended for same-PC use).\n"
+                "Set to a specific IP to listen on one adapter only.");
             ImGui::SameLine(0.f, 16.f);
             ImGui::Text("Port:"); ImGui::SameLine();
             ImGui::SetNextItemWidth(70.f);
             ImGui::InputInt("##an_port", &nc.artnet_port, 0, 0);
             if (nc.artnet_port < 1)     nc.artnet_port = 1;
             if (nc.artnet_port > 65535) nc.artnet_port = 65535;
+            ImGui::SetItemTooltip("Standard Art-Net port is 6454.");
 
             ImGui::Checkbox("Merge HTP##an_htp", &nc.artnet_merge_htp);
             ImGui::SetItemTooltip("Merge multiple Art-Net sources using HTP.");
@@ -931,6 +1095,19 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
         }
 
         ImGui::Spacing();
+        ImGui::SeparatorText("DMX Universe Numbering");
+        ImGui::Spacing();
+        ImGui::SetNextItemWidth(80.f);
+        ImGui::DragInt("Universe Offset##dmx_univ_off", &nc.dmx_universe_offset, 1.f, -15, 15,
+                       "%d", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SetItemTooltip(
+            "Shifts the universe number used for all playback DMX trigger lookups.\n"
+            " 0 = no shift (default).\n"
+            "-1 = subtract 1 from every configured trigger universe (e.g. if project\n"
+            "     stores universe 1 but Art-Net data arrives on universe 0).\n"
+            "Does NOT affect channel numbers within a universe.");
+
+        ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
@@ -953,6 +1130,7 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
     // ── Tab 4: 3D Preview ─────────────────────────────────────────────────
     if (ImGui::BeginTabItem("3D Preview"))
     {
+        ImGui::BeginChild("##preview3d_scroll", ImVec2(0.f, 0.f), false, ImGuiWindowFlags_None);
         ImGui::Spacing();
         ImGui::SeparatorText("Preview Mode");
         ImGui::Spacing();
@@ -1018,6 +1196,38 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
         }
 
         ImGui::Spacing();
+        ImGui::SeparatorText("Room & Projection");
+        ImGui::Spacing();
+
+        ImGui::Text("Room Half-Width:");
+        ImGui::SameLine(200.f);
+        ImGui::SetNextItemWidth(160.f);
+        ImGui::SliderFloat("##p3d_rw", &p3d.room_half_width, 2.f, 20.f, "%.1f m");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Room half-width in metres. Room spans ±value left-right.");
+
+        ImGui::Text("Room Height:");
+        ImGui::SameLine(200.f);
+        ImGui::SetNextItemWidth(160.f);
+        ImGui::SliderFloat("##p3d_rh", &p3d.room_height, 2.f, 15.f, "%.1f m");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Room height from floor to ceiling in metres.");
+
+        ImGui::Text("Room Depth:");
+        ImGui::SameLine(200.f);
+        ImGui::SetNextItemWidth(160.f);
+        ImGui::SliderFloat("##p3d_rd", &p3d.room_depth, 5.f, 50.f, "%.1f m");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Room depth from laser to back wall in metres.");
+
+        ImGui::Text("Proj. Scale:");
+        ImGui::SameLine(200.f);
+        ImGui::SetNextItemWidth(160.f);
+        ImGui::SliderFloat("##p3d_ps", &p3d.proj_scale, 0.5f, 10.f, "%.1f m");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            "Laser projection half-size on the back wall in metres.\n"
+            "Equal X/Y gives a square output (1:1 aspect ratio).\n"
+            "Increase to zoom in on the wall, decrease to shrink.\n"
+            "Default 3.0 = 6×6m square projection area at the back wall.");
+
+        ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
         if (ImGui::Button("Reset to Defaults##p3d")) {
@@ -1056,16 +1266,16 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
                 ImGui::Text("X:");
                 ImGui::SameLine(60.f);
                 ImGui::SetNextItemWidth(160.f);
-                ImGui::DragFloat("##lp_x", &lp.pos_x, 0.1f, -6.f, 6.f, "%.2f m",
+                ImGui::DragFloat("##lp_x", &lp.pos_x, 0.1f, -p3d.room_half_width, p3d.room_half_width, "%.2f m",
                                  ImGuiSliderFlags_AlwaysClamp);
-                ImGui::SetItemTooltip("Laser X position in the room (metres, -6 to +6).");
+                ImGui::SetItemTooltip("Laser X position in the room (metres, ±room half-width).");
 
                 ImGui::Text("Y:");
                 ImGui::SameLine(60.f);
                 ImGui::SetNextItemWidth(160.f);
-                ImGui::DragFloat("##lp_y", &lp.pos_y, 0.1f, 0.f, 5.f, "%.2f m",
+                ImGui::DragFloat("##lp_y", &lp.pos_y, 0.1f, 0.f, p3d.room_height, "%.2f m",
                                  ImGuiSliderFlags_AlwaysClamp);
-                ImGui::SetItemTooltip("Laser Y position in the room (metres, 0 = floor, 5 = ceiling).");
+                ImGui::SetItemTooltip("Laser Y position in the room (metres, 0 = floor, room height = ceiling).");
 
                 ImGui::Text("Z:");
                 ImGui::SameLine(60.f);
@@ -1107,12 +1317,14 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
             }
         }
 
+        ImGui::EndChild();
         ImGui::EndTabItem();
     }
 
     // ── Tab: Keybinds ─────────────────────────────────────────────────────────
     if (ImGui::BeginTabItem("Keybinds"))
     {
+        ImGui::BeginChild("##keybinds_scroll", ImVec2(0.f, 0.f), false, ImGuiWindowFlags_None);
         ImGui::Spacing();
         ImGui::TextDisabled("Click a key field and press any key to rebind. Press Esc or Backspace to clear.");
         ImGui::Spacing();
@@ -1171,12 +1383,14 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
             }
             ImGui::EndTable();
         }
+        ImGui::EndChild();
         ImGui::EndTabItem();
     }
 
-    // ── Tab: Colors ───────────────────────────────────────────────────────────
-    if (ImGui::BeginTabItem("Colors"))
+    // ── Tab: Formatting ──────────────────────────────────────────────────────
+    if (ImGui::BeginTabItem("Formatting"))
     {
+        ImGui::BeginChild("##formatting_scroll", ImVec2(0.f, 0.f), false, ImGuiWindowFlags_None);
         ImGui::Spacing();
         ImGui::SeparatorText("Color Input Mode");
         ImGui::Spacing();
@@ -1193,16 +1407,35 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
                 state.color_input_mode = static_cast<CM>(mi);
         }
         ImGui::Spacing();
+        ImGui::SeparatorText("Timing Display Format");
+        ImGui::Spacing();
+        ImGui::TextWrapped("Controls how fade-in, fade-out, hold, and wait times are displayed in cue lists.");
+        ImGui::Spacing();
+        using TDM = UIState::TimingDisplayMode;
+        static const char* kTimingModes[] = {
+            "Seconds — \"1.25 s\"  (default)",
+            "MM:SS + BPM — \"00:01  120 BPM\"",
+            "MM:SS.ms — \"00:01.250\""
+        };
+        for (int ti = 0; ti < 3; ++ti) {
+            bool sel = (static_cast<int>(state.timing_display_mode) == ti);
+            if (ImGui::RadioButton(kTimingModes[ti], sel))
+                state.timing_display_mode = static_cast<TDM>(ti);
+        }
+        ImGui::TextDisabled("All formats still show all three values in tooltips on hover.");
+        ImGui::Spacing();
         ImGui::SeparatorText("Color Palette");
         ImGui::TextWrapped(
             "Default slots (0-7: RGBCMYW+Black, 8-15: secondaries) are always restored "
             "when starting a new show. Slots 16-31 are saved per showfile.\n"
             "REC + click empty slot = record. REM + click = clear slot.");
+        ImGui::EndChild();
         ImGui::EndTabItem();
     }
 
     if (ImGui::BeginTabItem("General"))
     {
+        ImGui::BeginChild("##general_scroll", ImVec2(0.f, 0.f), false, ImGuiWindowFlags_None);
         ImGui::Spacing();
         ImGui::SeparatorText("Autosave");
         ImGui::Spacing();
@@ -1228,11 +1461,13 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
         ImGui::Spacing();
         ImGui::TextDisabled("Version: " IDHMFIS_VERSION);
         ImGui::TextDisabled("Build: " __DATE__ " " __TIME__);
+        ImGui::EndChild();
         ImGui::EndTabItem();
     }
 
     if (ImGui::BeginTabItem("About"))
     {
+        ImGui::BeginChild("##about_scroll", ImVec2(0.f, 0.f), false, ImGuiWindowFlags_None);
         ImGui::Spacing();
         ImGui::TextUnformatted("IDHMFIS");
         ImGui::TextUnformatted("I Don't Have Money For ILDA Software");
@@ -1248,12 +1483,14 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
             "Becouse why should you have to pay to use a shitty projector as a \"laser?\"");
         ImGui::Spacing();
         ImGui::TextDisabled("Created by Onni Kauppinen");
+        ImGui::EndChild();
         ImGui::EndTabItem();
     }
 
     // ── Tab: Advanced ─────────────────────────────────────────────────────────
     if (ImGui::BeginTabItem("Advanced"))
     {
+        ImGui::BeginChild("##advanced_scroll", ImVec2(0.f, 0.f), false, ImGuiWindowFlags_None);
         ImGui::Spacing();
 
         ImGui::SeparatorText("Otaniemi Mode");
@@ -1348,6 +1585,7 @@ void panel_setup_content(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
                     "The file is overwritten each launch. Default: OFF.");
         }
 
+        ImGui::EndChild();
         ImGui::EndTabItem();
     }
 

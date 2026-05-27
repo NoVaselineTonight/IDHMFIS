@@ -55,7 +55,10 @@ private:
     void update_bpm(float onset_strength);
 
     // Compute band energies from FFT magnitude spectrum.
-    void compute_bands(const float* mag, int n_bins, float sample_rate);
+    // BUG #3 fix: returns raw (unsmoothed) band RMS values via out parameters
+    // instead of writing directly to current_snap_ under a separate lock.
+    void compute_bands(const float* mag, int n_bins, float sample_rate,
+                       float& out_sub, float& out_mid, float& out_high);
 
     // ── Internal state ────────────────────────────────────────────────────
     static constexpr int kFftSize = 2048;

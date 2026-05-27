@@ -134,7 +134,12 @@ private:
     // ---- Descriptor heaps ----
     ComPtr<ID3D12DescriptorHeap>       rtv_heap_;
     ComPtr<ID3D12DescriptorHeap>       dsv_heap_;
-    ComPtr<ID3D12DescriptorHeap>       srv_heap_;  // CBV/SRV/UAV
+    ComPtr<ID3D12DescriptorHeap>       srv_heap_;  // CBV/SRV/UAV (shader-visible)
+    // M-16: ClearUnorderedAccessViewFloat requires a NON-shader-visible CPU
+    // descriptor handle as its second argument.  Allocate a tiny separate heap
+    // with FLAG_NONE and copy the UAV descriptors used for clears into it.
+    ComPtr<ID3D12DescriptorHeap>       uav_clear_heap_;  // non-shader-visible, 1 descriptor
+    D3D12_CPU_DESCRIPTOR_HANDLE        hdr_uav_clear_cpu_{};  // CPU handle in uav_clear_heap_
 
     UINT rtv_descriptor_size_     = 0;
     UINT srv_descriptor_size_     = 0;

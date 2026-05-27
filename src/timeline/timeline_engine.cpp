@@ -2,7 +2,9 @@
 
 #include "timeline_engine.h"
 #include <algorithm>
+#include <cassert>
 #include <cmath>
+#include <limits>
 
 namespace idhmfis {
 
@@ -11,15 +13,29 @@ namespace idhmfis {
 // ─────────────────────────────────────────────────────────────────────────────
 TimelineEngine::Runtime* TimelineEngine::find_runtime(const std::string& id)
 {
-    for (size_t i = 0; i < defs_.size(); ++i)
-        if (defs_[i].id == id) return &runtimes_[i];
+    // BUG #4: verify parallel arrays are in sync before indexing runtimes_
+    assert(defs_.size() == runtimes_.size());
+    if (defs_.size() != runtimes_.size()) return nullptr;
+    for (size_t i = 0; i < defs_.size(); ++i) {
+        if (defs_[i].id == id) {
+            if (i < runtimes_.size()) return &runtimes_[i];
+            return nullptr;
+        }
+    }
     return nullptr;
 }
 
 const TimelineEngine::Runtime* TimelineEngine::find_runtime(const std::string& id) const
 {
-    for (size_t i = 0; i < defs_.size(); ++i)
-        if (defs_[i].id == id) return &runtimes_[i];
+    // BUG #4: verify parallel arrays are in sync before indexing runtimes_
+    assert(defs_.size() == runtimes_.size());
+    if (defs_.size() != runtimes_.size()) return nullptr;
+    for (size_t i = 0; i < defs_.size(); ++i) {
+        if (defs_[i].id == id) {
+            if (i < runtimes_.size()) return &runtimes_[i];
+            return nullptr;
+        }
+    }
     return nullptr;
 }
 
@@ -50,11 +66,16 @@ TimelineTrack* TimelineEngine::find_track(TimelineDef& def, int track_id)
 void TimelineEngine::collect_events(const TimelineDef& def, Runtime& rt,
                                     int64_t new_pos, std::vector<FiredEvent>& out)
 {
+    bool wait_hit = false;
     for (const auto& track : def.tracks) {
+        if (wait_hit) break;
         if (track.muted) continue;
         // Binary search to the first event after last_event_pos
+        // BUG #48: guard INT64_MAX overflow before incrementing
         TimelineEvent key;
-        key.tc_position = rt.last_event_pos + 1;
+        key.tc_position = (rt.last_event_pos < std::numeric_limits<int64_t>::max())
+                              ? rt.last_event_pos + 1
+                              : std::numeric_limits<int64_t>::max();
         auto it = std::lower_bound(track.events.begin(), track.events.end(), key,
             [](const TimelineEvent& a, const TimelineEvent& b){
                 return a.tc_position < b.tc_position;
@@ -63,10 +84,14 @@ void TimelineEngine::collect_events(const TimelineDef& def, Runtime& rt,
             FiredEvent fe;
             fe.timeline_id = def.id;
             fe.event       = *it;
-            // If this is a WaitForGo event, set the wait flag before adding to output
-            if (it->type == TimelineEventType::WaitForGo)
-                rt.wait_for_go = true;
             out.push_back(std::move(fe));
+            if (it->type == TimelineEventType::WaitForGo) {
+                rt.wait_for_go = true;
+                // Stop collecting from remaining tracks this tick so no events
+                // from later tracks fire past the WaitForGo barrier.
+                wait_hit = true;
+                break;
+            }
         }
     }
     rt.last_event_pos = new_pos;
@@ -78,7 +103,16 @@ void TimelineEngine::collect_events(const TimelineDef& def, Runtime& rt,
 std::vector<TimelineEngine::FiredEvent>
 TimelineEngine::tick(const TimecodeState& tc, double dt_s)
 {
+    // H-6: hold the mutex for the entire tick so that no CRUD call from a command
+    // handler running concurrently (UI-thread initiated engine command) corrupts
+    // defs_ or runtimes_ while we iterate them.
+    std::lock_guard<std::mutex> lk(mtx_);
+
     std::vector<FiredEvent> fired;
+
+    // BUG #4: ensure parallel arrays are consistent before indexed access
+    assert(defs_.size() == runtimes_.size());
+    if (defs_.size() != runtimes_.size()) return fired;
 
     for (size_t i = 0; i < defs_.size(); ++i) {
         const TimelineDef& def = defs_[i];
@@ -183,6 +217,7 @@ TimelineEngine::tick(const TimecodeState& tc, double dt_s)
 // ─────────────────────────────────────────────────────────────────────────────
 void TimelineEngine::play(const std::string& id)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     Runtime* rt = find_runtime(id);
     if (!rt) return;
     rt->state       = TimelineState::Playing;
@@ -191,6 +226,7 @@ void TimelineEngine::play(const std::string& id)
 
 void TimelineEngine::pause(const std::string& id)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     Runtime* rt = find_runtime(id);
     if (!rt) return;
     if (rt->state == TimelineState::Playing)
@@ -201,6 +237,7 @@ void TimelineEngine::pause(const std::string& id)
 
 void TimelineEngine::stop(const std::string& id)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     Runtime* rt = find_runtime(id);
     if (!rt) return;
     rt->state          = TimelineState::Idle;
@@ -212,6 +249,7 @@ void TimelineEngine::stop(const std::string& id)
 
 void TimelineEngine::rewind(const std::string& id)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     Runtime* rt = find_runtime(id);
     if (!rt) return;
     rt->internal_clock = 0.0;
@@ -221,12 +259,18 @@ void TimelineEngine::rewind(const std::string& id)
 
 void TimelineEngine::seek(const std::string& id, int64_t frame)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     Runtime* rt = find_runtime(id);
     const TimelineDef* def = find_def(id);
     if (!rt || !def) return;
     int fps_int = smpte_max_frames(def->fps);
     if (fps_int <= 0) fps_int = 25;
-    if (frame < 0) frame = 0;
+    // BUG #15: clamp to [0, length_frames_] to prevent seeking past end;
+    // BUG #49: clamping to length_frames_ also bounds the value so that the
+    //          subsequent double cast does not overflow.
+    int64_t length = def->length_frames > 0 ? def->length_frames
+                                             : std::numeric_limits<int64_t>::max();
+    frame = std::max(int64_t{0}, std::min(frame, length));
     rt->pos            = frame;
     rt->last_event_pos = frame - 1;
     rt->internal_clock = static_cast<double>(frame) / static_cast<double>(fps_int);
@@ -234,6 +278,7 @@ void TimelineEngine::seek(const std::string& id, int64_t frame)
 
 void TimelineEngine::set_armed(const std::string& id, bool armed)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     Runtime* rt = find_runtime(id);
     if (!rt) return;
     if (armed && rt->state == TimelineState::Idle)
@@ -244,6 +289,7 @@ void TimelineEngine::set_armed(const std::string& id, bool armed)
 
 void TimelineEngine::wait_for_go_advance(const std::string& id)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     Runtime* rt = find_runtime(id);
     if (!rt) return;
     rt->wait_for_go = false;
@@ -251,9 +297,18 @@ void TimelineEngine::wait_for_go_advance(const std::string& id)
 
 void TimelineEngine::set_wait_for_go(const std::string& id)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     Runtime* rt = find_runtime(id);
     if (!rt) return;
     rt->wait_for_go = true;
+}
+
+void TimelineEngine::clear_record_armed(const std::string& id)
+{
+    std::lock_guard<std::mutex> lk(mtx_);
+    TimelineDef* def = find_def_mut(id);
+    if (!def) return;
+    def->record_armed = false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -261,6 +316,7 @@ void TimelineEngine::set_wait_for_go(const std::string& id)
 // ─────────────────────────────────────────────────────────────────────────────
 void TimelineEngine::create(TimelineDef def)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     // Avoid duplicates
     for (const auto& d : defs_)
         if (d.id == def.id) return;
@@ -271,6 +327,7 @@ void TimelineEngine::create(TimelineDef def)
 
 void TimelineEngine::remove(const std::string& id)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     for (size_t i = 0; i < defs_.size(); ++i) {
         if (defs_[i].id == id) {
             defs_.erase(defs_.begin() + static_cast<ptrdiff_t>(i));
@@ -282,6 +339,7 @@ void TimelineEngine::remove(const std::string& id)
 
 void TimelineEngine::update_def(TimelineDef def)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     for (size_t i = 0; i < defs_.size(); ++i) {
         if (defs_[i].id == def.id) {
             defs_[i] = std::move(def);
@@ -296,6 +354,7 @@ void TimelineEngine::update_def(TimelineDef def)
 void TimelineEngine::add_track(const std::string& timeline_id,
                                 const std::string& name)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     Runtime*    rt  = find_runtime(timeline_id);
     TimelineDef* def = find_def_mut(timeline_id);
     if (!rt || !def) return;
@@ -308,6 +367,7 @@ void TimelineEngine::add_track(const std::string& timeline_id,
 
 void TimelineEngine::remove_track(const std::string& timeline_id, int track_id)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     TimelineDef* def = find_def_mut(timeline_id);
     if (!def) return;
     def->tracks.erase(
@@ -320,6 +380,7 @@ void TimelineEngine::update_track(const std::string& timeline_id, int track_id,
                                    const std::string& name, bool muted,
                                    bool locked, bool collapsed)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     TimelineDef* def = find_def_mut(timeline_id);
     if (!def) return;
     TimelineTrack* t = find_track(*def, track_id);
@@ -336,6 +397,7 @@ void TimelineEngine::update_track(const std::string& timeline_id, int track_id,
 void TimelineEngine::add_event(const std::string& timeline_id, int track_id,
                                 TimelineEvent ev)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     Runtime*    rt  = find_runtime(timeline_id);
     TimelineDef* def = find_def_mut(timeline_id);
     if (!rt || !def) return;
@@ -354,20 +416,21 @@ void TimelineEngine::add_event(const std::string& timeline_id, int track_id,
 void TimelineEngine::remove_event(const std::string& timeline_id, int track_id,
                                    int64_t event_id)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     TimelineDef* def = find_def_mut(timeline_id);
     if (!def) return;
     TimelineTrack* t = find_track(*def, track_id);
     if (!t) return;
-    // event_id is the tc_position passed from the UI layer — not the internal sequential id.
     t->events.erase(
         std::remove_if(t->events.begin(), t->events.end(),
-                       [event_id](const TimelineEvent& e){ return e.tc_position == event_id; }),
+                       [event_id](const TimelineEvent& e){ return e.id == event_id; }),
         t->events.end());
 }
 
 void TimelineEngine::update_event(const std::string& timeline_id, int track_id,
                                    TimelineEvent ev)
 {
+    std::lock_guard<std::mutex> lk(mtx_);
     TimelineDef* def = find_def_mut(timeline_id);
     if (!def) return;
     TimelineTrack* t = find_track(*def, track_id);
@@ -393,6 +456,10 @@ TimecodeSourceStatus TimelineEngine::source_status(const TimecodeState& tc,
 {
     if (slot == "Internal") return TimecodeSourceStatus::Disabled;
     if (!tc.valid)          return TimecodeSourceStatus::Disabled;
+    std::lock_guard<std::mutex> lk(mtx_);
+    // BUG #4: ensure parallel arrays are consistent before indexed access
+    assert(defs_.size() == runtimes_.size());
+    if (defs_.size() != runtimes_.size()) return TimecodeSourceStatus::Disabled;
     // Check if any timeline using this slot is actively playing
     for (size_t i = 0; i < defs_.size(); ++i) {
         if (defs_[i].tc_slot == slot && !defs_[i].link_mode) {
@@ -408,6 +475,10 @@ TimecodeSourceStatus TimelineEngine::source_status(const TimecodeState& tc,
 // ─────────────────────────────────────────────────────────────────────────────
 std::vector<TimelineEngine::RuntimeSnap> TimelineEngine::runtime_snaps() const
 {
+    std::lock_guard<std::mutex> lk(mtx_);
+    // BUG #4: ensure parallel arrays are consistent before indexed access
+    assert(defs_.size() == runtimes_.size());
+    if (defs_.size() != runtimes_.size()) return {};
     std::vector<RuntimeSnap> out;
     out.reserve(defs_.size());
     for (size_t i = 0; i < defs_.size(); ++i) {

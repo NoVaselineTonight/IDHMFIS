@@ -197,7 +197,10 @@ void AudioAnalyzer::process_fft(const float* samples, int n)
         mag[i] = rms * std::exp(-static_cast<float>(i) / 64.f);
 #endif
 
-    compute_bands(mag, kNBins, sample_rate_);
+    // BUG #3 fix: compute_bands now returns raw values; smoothing and final
+    // snapshot publish happen under a single snap_mtx_ acquisition below.
+    float raw_sub = 0.f, raw_mid = 0.f, raw_high = 0.f;
+    compute_bands(mag, kNBins, sample_rate_, raw_sub, raw_mid, raw_high);
 
     // Onset strength: ratio of current energy to previous
     float onset = std::max(0.f, rms - prev_energy_);
@@ -217,39 +220,51 @@ void AudioAnalyzer::process_fft(const float* samples, int n)
         beat_threshold_ = beat_threshold_ * 0.9f + onset * 0.1f;
     }
 
-    // Publish snapshot
-    AudioSnapshot snap;
-    snap.rms      = rms_smooth_;
-    snap.peak     = peak;
-    snap.beat_now = beat_now;
-
-    // Fill FFT bins (downsample kNBins → kFFTBins)
-    {
-        static constexpr float kScale = 4.f; // perceptual normalisation
-        for (int i = 0; i < AudioSnapshot::kFFTBins; ++i)
-        {
-            int src = static_cast<int>(
-                static_cast<float>(i) / AudioSnapshot::kFFTBins * kNBins);
-            snap.fft[i] = std::min(mag[src] * kScale, 1.f);
-        }
-    }
-
+    // Publish snapshot — hold snap_mtx_ for the entire atomic write so no
+    // reader observes a partially-updated snapshot (BUG #3 TOCTOU fix).
     {
         std::lock_guard<std::mutex> lk(snap_mtx_);
-        // Preserve smoothed bands
-        snap.sub_band  = current_snap_.sub_band;
-        snap.mid_band  = current_snap_.mid_band;
-        snap.high_band = current_snap_.high_band;
+
+        AudioSnapshot snap;
+        snap.rms      = rms_smooth_;
+        snap.peak     = peak;
+        snap.beat_now = beat_now;
+
+        // Fill FFT bins (downsample kNBins → kFFTBins)
+        {
+            static constexpr float kScale = 4.f; // perceptual normalisation
+            for (int i = 0; i < AudioSnapshot::kFFTBins; ++i)
+            {
+                int src = static_cast<int>(
+                    static_cast<float>(i) / AudioSnapshot::kFFTBins * kNBins);
+                snap.fft[i] = std::min(mag[src] * kScale, 1.f);
+            }
+        }
+
+        // Apply smoothing to band energies and preserve BPM (smoothed by update_bpm)
+        snap.sub_band  = current_snap_.sub_band  * 0.8f + raw_sub  * 0.2f;
+        snap.mid_band  = current_snap_.mid_band  * 0.8f + raw_mid  * 0.2f;
+        snap.high_band = current_snap_.high_band * 0.8f + raw_high * 0.2f;
         snap.bpm       = current_snap_.bpm;
+
         current_snap_  = snap;
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  compute_bands — compute sub/mid/high energy from FFT magnitudes
+//
+//  BUG #3 fix: This function no longer acquires snap_mtx_ or writes to
+//  current_snap_ directly.  It returns the raw (unsmoothed) band RMS values
+//  via output parameters so that process_fft can apply smoothing and publish
+//  the entire snapshot atomically under a single snap_mtx_ acquisition.
 // ─────────────────────────────────────────────────────────────────────────────
-void AudioAnalyzer::compute_bands(const float* mag, int n_bins, float sr)
+void AudioAnalyzer::compute_bands(const float* mag, int n_bins, float sr,
+                                   float& out_sub, float& out_mid, float& out_high)
 {
+    // Guard against zero sample rate to avoid division by zero (BUG #17 site)
+    if (sr <= 0.f) { out_sub = out_mid = out_high = 0.f; return; }
+
     // Frequency resolution: sr / kFftSize Hz per bin
     float bin_hz = sr / kFftSize;
 
@@ -265,15 +280,9 @@ void AudioAnalyzer::compute_bands(const float* mag, int n_bins, float sr)
         else if (freq < 20000.f)       { high += m * m; ++nh; }
     }
 
-    float sub_rms  = ns  ? std::sqrt(sub  / ns)  : 0.f;
-    float mid_rms  = nm  ? std::sqrt(mid  / nm)  : 0.f;
-    float high_rms = nh  ? std::sqrt(high / nh)  : 0.f;
-
-    // Smooth
-    std::lock_guard<std::mutex> lk(snap_mtx_);
-    current_snap_.sub_band  = current_snap_.sub_band  * 0.8f + sub_rms  * 0.2f;
-    current_snap_.mid_band  = current_snap_.mid_band  * 0.8f + mid_rms  * 0.2f;
-    current_snap_.high_band = current_snap_.high_band * 0.8f + high_rms * 0.2f;
+    out_sub  = ns ? std::sqrt(sub  / ns)  : 0.f;
+    out_mid  = nm ? std::sqrt(mid  / nm)  : 0.f;
+    out_high = nh ? std::sqrt(high / nh)  : 0.f;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -286,6 +295,9 @@ void AudioAnalyzer::compute_bands(const float* mag, int n_bins, float sr)
 // ─────────────────────────────────────────────────────────────────────────────
 void AudioAnalyzer::update_bpm(float onset)
 {
+    // BUG #17: guard against zero sample rate before any division
+    if (sample_rate_ <= 0.f) return;
+
     onset_history_[onset_write_] = onset;
     onset_write_ = (onset_write_ + 1) % kBpmHistLen;
 
@@ -365,6 +377,40 @@ void AudioAnalyzer::wasapi_loop()
 
         sample_rate_ = static_cast<float>(fmt->nSamplesPerSec);
         int channels = fmt->nChannels;
+
+        // BUG #18: WASAPI reporting 0 channels would cause division by zero in
+        // the capture loop (s /= channels).  Abort capture if this occurs.
+        if (channels == 0) {
+            log::error("AudioAnalyzer: WASAPI reported 0 channels, aborting capture");
+            CoTaskMemFree(fmt);
+            goto cleanup_wasapi;
+        }
+
+        // H-18: Verify the mix format is IEEE float so our float* cast in the
+        // capture loop is valid. GetMixFormat() returns WAVEFORMATEXTENSIBLE
+        // (wFormatTag == WAVE_FORMAT_EXTENSIBLE, cbSize >= 22) on virtually all
+        // modern Windows systems. The SubFormat must be KSDATAFORMAT_SUBTYPE_IEEE_FLOAT.
+        // Integer PCM formats (KSDATAFORMAT_SUBTYPE_PCM) would require a separate
+        // conversion path; log an error and bail rather than reading garbage data.
+        {
+            bool is_float = false;
+            if (fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+                is_float = true;
+            } else if (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && fmt->cbSize >= 22) {
+                const auto* ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(fmt);
+                // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT GUID
+                static const GUID kFloatGuid =
+                    {0x00000003, 0x0000, 0x0010,
+                     {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+                is_float = (IsEqualGUID(ext->SubFormat, kFloatGuid) != 0);
+            }
+            if (!is_float) {
+                log::error("AudioAnalyzer: WASAPI mix format is not IEEE float (tag=0x%04X) — "
+                           "capture disabled to avoid corrupt audio data", fmt->wFormatTag);
+                CoTaskMemFree(fmt);
+                goto cleanup_wasapi;
+            }
+        }
 
         // Initialise loopback capture (AUDCLNT_STREAMFLAGS_LOOPBACK)
         hr = client->Initialize(
@@ -477,6 +523,11 @@ void AudioAnalyzer::file_loop()
     while (capture_running_.load(std::memory_order_acquire))
     {
         // Simulate realtime: push kHopSize samples every hop_period ms
+        // BUG #17: guard against zero sample rate to avoid division by zero
+        if (sample_rate_ <= 0.f) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
         float hop_ms = (kHopSize / sample_rate_) * 1000.f;
 
         for (int i = 0; i < kHopSize; ++i)
