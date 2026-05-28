@@ -24,6 +24,7 @@
 #include "core/timer.h"
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -31,6 +32,17 @@
 #include <vector>
 
 namespace idhmfis {
+
+// Key identifying a DacManager by its hardware binding.
+// Used by reconcile_laser_managers() to detect reusable vs. stale managers.
+struct DacHardwareKey {
+    std::string dac_type;
+    std::string dac_address;
+    int         ordinal;
+    bool operator==(const DacHardwareKey& o) const {
+        return dac_type == o.dac_type && dac_address == o.dac_address && ordinal == o.ordinal;
+    }
+};
 
 class DacManager {
 public:
@@ -57,6 +69,20 @@ public:
     // Returns true while the manager is still starting (last_loop_ms_ == 0) to avoid
     // false positives during the probe/connect phase.
     bool is_healthy(int64_t timeout_ms = 3000) const;
+
+    // True if this manager has been started but the output thread hasn't yet
+    // completed its first loop iteration AND started_at_ms_ is < 30 s ago.
+    // Distinguishes a freshly-started manager from a zombie (stop_requested_ set
+    // but running_ still false) so the health checker won't false-positive on startup.
+    bool is_starting() const {
+        if (!running_.load(std::memory_order_acquire)) return false;
+        if (last_loop_ms_.load(std::memory_order_relaxed) != 0) return false;
+        int64_t started = started_at_ms_.load(std::memory_order_relaxed);
+        if (started == 0) return false;
+        int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        return (now_ms - started) < 30000;
+    }
 
     // Clear the stop_requested_ flag so a restarted manager can call start() again.
     // Only call this when you own the last reference and intend to re-use the object.

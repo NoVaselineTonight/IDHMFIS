@@ -22,8 +22,7 @@ const std::vector<FxParam*> BlockScale::params() const {
              const_cast<FxParam*>(&p_center_y_) };
 }
 
-void BlockScale::process(PointBuffer& buf, float dt, const ExprContext& /*ctx*/) {
-    (void)dt;
+void BlockScale::process(PointBuffer& buf, float /*dt*/, const ExprContext& /*ctx*/) {
     const float sx = p_scale_x_.effective();
     const float sy = p_scale_y_.effective();
     const float cx = p_center_x_.effective();
@@ -34,6 +33,9 @@ void BlockScale::process(PointBuffer& buf, float dt, const ExprContext& /*ctx*/)
     for (LaserPoint& pt : buf) {
         float nx = (static_cast<float>(pt.x) * kInv - cx) * sx + cx;
         float ny = (static_cast<float>(pt.y) * kInv - cy) * sy + cy;
+
+        if (!pt.blanked && (nx < -1.f || nx > 1.f || ny < -1.f || ny > 1.f))
+            pt.blanked = true;
 
         pt.x = static_cast<int16_t>(std::clamp(nx, -1.f, 1.f) * kScale);
         pt.y = static_cast<int16_t>(std::clamp(ny, -1.f, 1.f) * kScale);

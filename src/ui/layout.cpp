@@ -1136,11 +1136,9 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
                 fce.keyframe_layer.symmetry_mode = static_cast<int>(ctx.frame_editor.symmetry);
                 fce.global_layer = ctx.programmer_global;
                 fce.fx_layer     = ctx.programmer_fx_layer;
-                fce.per_stream_fx.clear();
-                fce.per_stream_kf.clear();
-                // Only store entries for the currently-active streams.
-                // Stale programmer_feeds from other streams are intentionally excluded
-                // so a cue recorded for a group does not activate unselected streams.
+                // Do NOT clear per_stream_fx / per_stream_kf here.
+                // The loop below overwrites only the active streams in-place so that
+                // non-active streams' content is preserved in the updated cue.
                 for (int sid : state.active_stream_ids) {
                     auto it = ctx.programmer_feeds.find(std::to_string(sid));
                     if (it == ctx.programmer_feeds.end()) continue;
@@ -1167,8 +1165,11 @@ void panel_operator_sidebar(UIState& state, LayoutContext& ctx, LayoutCallbacks&
                 fce.keyframe_layer.symmetry_mode = static_cast<int>(ctx.frame_editor.symmetry);
                 fce.global_layer = ctx.programmer_global;
                 fce.fx_layer     = ctx.programmer_fx_layer;
-                fce.per_stream_fx.clear();
-                fce.per_stream_kf.clear();
+                // Do NOT clear per_stream_fx / per_stream_kf here.
+                // Clearing would destroy content for streams that are not currently
+                // selected.  The loop below overwrites only the active streams in-place,
+                // leaving every non-active stream's data intact so a multi-head cue is
+                // not silently corrupted when the operator updates a single head.
                 for (int sid : state.active_stream_ids) {
                     auto it = ctx.programmer_feeds.find(std::to_string(sid));
                     if (it == ctx.programmer_feeds.end()) continue;

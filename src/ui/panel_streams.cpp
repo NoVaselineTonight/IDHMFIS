@@ -81,6 +81,12 @@ static void feeds_switch_s(const std::vector<int>& old_ids,
                 ctx.frame_editor.objects = it->second.objects;
                 ctx.programmer_global   = it->second.global;
                 ctx.programmer_fx_layer = it->second.fx;
+            } else {
+                // Target stream has no saved content — clear programmer so FX from the
+                // previous stream don't bleed into this one visually or when recording.
+                ctx.frame_editor.objects = {};
+                ctx.programmer_global    = {};
+                ctx.programmer_fx_layer  = {};
             }
         }
     }

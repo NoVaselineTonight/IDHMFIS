@@ -69,6 +69,7 @@
 #include <memory>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <fstream>
 
 namespace idhmfis {
@@ -535,23 +536,15 @@ struct Application::Impl {
     std::string      pending_orphan_recovery_;   // non-empty = show crash-recovery modal
 
     // ── Output patch applying overlay ─────────────────────────────────────────
-    // Counts how many DacManager background operations (start OR stop) are in
-    // flight. run_frame() shows a blocking overlay while this is > 0.
-    // H-16: start() threads are also tracked here so that apply_output_patch
-    // does not remove or delete a DacManager while it is still starting up.
+    // Separate counters for in-flight stop vs. start operations so the deferred
+    // reinit gate can correctly wait for BOTH phases to complete.
     std::atomic<int> dacs_stopping_{ 0 };
+    std::atomic<int> dacs_starting_{ 0 };
 
     // ── Post-load / reinit safeguards ─────────────────────────────────────────
-    // post_load_sync_guard_frames_: while > 0, sync_state_from_engine() skips
-    // copying snap.active_stream_ids so stale engine snapshots (produced between
-    // the teardown SetActiveStreams{{}} and the rebuild SetActiveStreams{new})
-    // cannot overwrite the value that do_load_project just restored.
-    // Decremented once per frame in sync_state_from_engine().
-    int  post_load_sync_guard_frames_ = 0;
     // post_load_reinit_pending_: set after a show load or manual Reinit request.
-    // Once dacs_stopping_ reaches 0 (all DacManagers have finished starting),
-    // run_frame() does one final on_output_patch_changed() to ensure the engine
-    // has the correct bus wiring and the active_stream_ids are propagated.
+    // Once both dacs_stopping_ and dacs_starting_ reach 0, run_frame() does a
+    // final SetActiveStreams to ensure the engine has the correct active streams.
     bool post_load_reinit_pending_    = false;
 
     // ── Output health check epoch ─────────────────────────────────────────────
@@ -572,6 +565,11 @@ struct Application::Impl {
     void do_load_project(const std::string& path); // blocking project load + state restore
     void do_new_project();                          // reset all state to a fresh empty project
     void check_output_health();                     // periodic: verify patched lasers have running managers
+    // Unified DacManager creation/reuse/teardown for all three code paths.
+    // allow_reuse=true: keep healthy managers that match the new config (patch change).
+    // allow_reuse=false: stop & replace every manager (load / forced reinit).
+    void reconcile_laser_managers(const std::vector<OutputStreamConfig>& configs,
+                                   bool allow_reuse = true);
 
     // ── Callback wiring ───────────────────────────────────────────────────────
     void wire_callbacks();
@@ -872,16 +870,9 @@ void Application::Impl::sync_state_from_engine() {
     // into the UIState.patched_outputs list which the Patch view owns.
     // The config (name, type, settings) is UI-owned; the status fields come from the engine.
     //
-    // Post-load guard: after a show load (or manual Reinit), suppress the snapshot
-    // copy for a few frames.  Between the teardown SetActiveStreams{{}} and the
-    // rebuild SetActiveStreams{new}, the engine snapshot carries the empty value.
-    // Without this guard that stale {} would overwrite the IDs we just restored,
-    // making the programmer target no streams until the next health-check cycle.
-    if (post_load_sync_guard_frames_ > 0) {
-        --post_load_sync_guard_frames_;
-    } else {
-        state.active_stream_ids = snap.active_stream_ids;
-    }
+    // active_stream_ids is UI-owned — the engine snapshot is not authoritative for it.
+    // It is set by do_load_project, on_output_patch_changed, and the deferred reinit.
+    // Do NOT copy snap.active_stream_ids here.
 
     // Sync per-stream point buffers for 3D preview
     state.stream_previews.clear();
@@ -1141,46 +1132,13 @@ void Application::Impl::do_load_project(const std::string& path) {
         }
         // Restore output patch
         {
-            // Tear down all existing DacManagers INLINE (without calling
-            // on_output_patch_changed({})) to avoid sending SetOutputPatch{{}} to
-            // the engine.  Sending an empty patch forces the engine into legacy mode
-            // (submitting every frame only to bus_ / ordinal-0), which means all
-            // ordinals 1-N receive no frames during the entire teardown window.
-            // More importantly, it can confuse the engine's output_streams_ map so
-            // that when the rebuild's SetOutputPatch{cfgs} arrives, the bus pointer
-            // re-assignment is racing with a stale assignment from the legacy path.
-            //
-            // By skipping SetOutputPatch{{}}, the engine keeps its current
-            // output_streams_ active during the DAC-stop gap.  The rebuild's
-            // SetOutputPatch{cfgs} then performs a clean full reconciliation (NDI
-            // senders for removed streams are shut down, bus pointers are explicitly
-            // re-assigned via the laser_idx counting in the handler, independent of
-            // any migration from old output_streams_).
-            //
-            // We DO send SetActiveStreams{{}} so the programmer stops routing to
-            // stale stream IDs while the new DacManagers are starting up.
-            {
-                log::info("do_load_project: tearing down DacManagers (inline, no engine patch clear)");
-                for (auto& [id, mgr] : laser_managers_) {
-                    auto shared = mgr;
-                    dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
-                    std::thread([shared, this]() mutable {
-                        shared->stop();
-                        dacs_stopping_.fetch_sub(1, std::memory_order_release);
-                    }).detach();
-                }
-                laser_managers_.clear();
-                laser_ordinals_.clear();
-                // Destroy HDMI windows belonging to the outgoing project.
-                for (auto& [id, w] : hdmi_windows_) SDL_DestroyWindow(w);
-                hdmi_windows_.clear();
-                // Blank active streams so the programmer doesn't route to stale IDs.
-                // Intentionally NOT sending SetOutputPatch{{}} — see comment above.
-                engine->send(cmd::SetActiveStreams{{}});
-            }
-
-            while (dacs_stopping_.load(std::memory_order_acquire) > 0)
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            log::info("do_load_project: reconciling DacManagers for new show");
+            // Destroy HDMI windows belonging to the outgoing project.
+            for (auto& [id, w] : hdmi_windows_) SDL_DestroyWindow(w);
+            hdmi_windows_.clear();
+            // Blank active streams while managers are being reconfigured.
+            // Do NOT send SetOutputPatch{{}} — empty patch forces legacy mode in engine.
+            engine->send(cmd::SetActiveStreams{{}});
 
             state.patched_outputs.clear();
             for (const auto& cfg : project->output_patch) {
@@ -1199,33 +1157,35 @@ void Application::Impl::do_load_project(const std::string& path) {
                 layout_ctx.patch_selected_id = state.patched_outputs.front().id;
             else
                 layout_ctx.patch_selected_id = -1;
-            // Restore active_stream_ids and broadcast_to_all BEFORE calling
-            // on_output_patch_changed so step 7 of the callback uses the correct
-            // values from the loaded project (teardown above cleared them).
+            // Restore active_stream_ids BEFORE reconciling so active stream
+            // computation uses the correct values from the loaded project.
             state.active_stream_ids = project->active_stream_ids;
             state.broadcast_to_all  = project->broadcast_to_all;
-            // Bug 26: if the project was saved with no active streams and broadcast disabled
-            // (e.g. all streams were deselected before save), nothing would be sent to the DAC
-            // on load.  Fall back to broadcast mode so at least stream 1 gets output.
             if (!state.broadcast_to_all && state.active_stream_ids.empty() && !state.patched_outputs.empty())
                 state.broadcast_to_all = true;
-            if (layout_cbs.on_output_patch_changed) {
+
+            if (!state.patched_outputs.empty()) {
                 std::vector<OutputStreamConfig> cfgs;
                 cfgs.reserve(state.patched_outputs.size());
                 for (const auto& po : state.patched_outputs)
                     cfgs.push_back(po.config);
-                layout_cbs.on_output_patch_changed(cfgs);
+                // allow_reuse=true: keep managers for identical hardware to avoid USB teardown.
+                reconcile_laser_managers(cfgs, /*allow_reuse=*/true);
+                engine->send(cmd::SetOutputPatch{ cfgs });
+                std::vector<int> new_active;
+                if (state.broadcast_to_all) {
+                    for (const auto& po : state.patched_outputs)
+                        if (po.type == OutputStreamType::Laser && po.enabled)
+                            new_active.push_back(po.id);
+                } else {
+                    new_active = state.active_stream_ids;
+                }
+                engine->send(cmd::SetActiveStreams{ new_active });
+                state.active_stream_ids = new_active;
             }
-            // Post-load safeguards:
-            // (a) Protect state.active_stream_ids from stale engine snapshots for
-            //     10 frames — the teardown sent SetActiveStreams{{}} and the engine
-            //     snapshot won't reflect the new SetActiveStreams{new_active} until
-            //     the engine thread processes it.  sync_state_from_engine() skips
-            //     the copy while this counter is > 0.
-            // (b) Request one deferred re-apply once all DacManager start() threads
-            //     have finished, ensuring clean bus wiring and correct engine state.
-            post_load_sync_guard_frames_ = 10;
-            post_load_reinit_pending_    = true;
+            // Schedule a deferred SetActiveStreams re-send once all managers finish
+            // starting, to guarantee correct routing after slow hardware (EtherDream).
+            post_load_reinit_pending_ = true;
         }
         // Restore output groups
         {
@@ -1526,13 +1486,115 @@ void Application::Impl::do_new_project() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  reconcile_laser_managers — single authoritative DacManager creation path
+//  allow_reuse=true:  keep healthy managers with matching ordinal (patch change).
+//  allow_reuse=false: stop & replace every manager (load / forced reinit).
+// ─────────────────────────────────────────────────────────────────────────────
+void Application::Impl::reconcile_laser_managers(
+        const std::vector<OutputStreamConfig>& configs,
+        bool allow_reuse)
+{
+    // ── 1. Compute target ordinals (positional laser index) ───────────────────
+    std::unordered_map<int, int> target_ord;
+    {
+        int ord = 0;
+        for (const auto& cfg : configs)
+            if (cfg.type == OutputStreamType::Laser)
+                target_ord[cfg.id] = ord++;
+    }
+
+    // ── 2. Determine which managers to keep, update, restart, or create ───────
+    std::unordered_set<int> keep_ids;
+
+    for (const auto& cfg : configs) {
+        if (cfg.type != OutputStreamType::Laser) continue;
+        int ord = target_ord[cfg.id];
+        auto it = laser_managers_.find(cfg.id);
+
+        if (it != laser_managers_.end()) {
+            auto& mgr = it->second;
+            int prev_ord = laser_ordinals_.count(cfg.id) ? laser_ordinals_[cfg.id] : ord;
+            bool ordinal_changed = (prev_ord != ord);
+            bool is_dead = (!mgr->is_running() && !mgr->is_starting());
+
+            if (!allow_reuse || ordinal_changed || is_dead) {
+                auto old_mgr = mgr;
+                laser_managers_.erase(cfg.id);
+                laser_ordinals_.erase(cfg.id);
+                dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
+                std::thread([old_mgr, this]() mutable {
+                    old_mgr->stop();
+                    dacs_stopping_.fetch_sub(1, std::memory_order_release);
+                }).detach();
+                it = laser_managers_.end();
+                if (is_dead && !ordinal_changed)
+                    log::warn("reconcile: DacManager id=%d was dead — restarting", cfg.id);
+                else if (ordinal_changed)
+                    log::info("reconcile: DacManager id=%d ordinal changed %d->%d — recreating",
+                              cfg.id, prev_ord, ord);
+                else
+                    log::info("reconcile: DacManager id=%d forced reinit", cfg.id);
+            } else {
+                if (cfg.dac_type != "auto" && !cfg.dac_type.empty())
+                    mgr->force_dac(cfg.dac_type, cfg.dac_address);
+                if (cfg.point_rate > 0)
+                    mgr->set_point_rate(cfg.point_rate);
+                laser_ordinals_[cfg.id] = ord;
+                keep_ids.insert(cfg.id);
+                continue;
+            }
+        }
+
+        // Create new manager
+        RenderBus* bus = engine->extra_laser_bus(ord);
+        auto mgr = std::make_shared<DacManager>(*bus, ord);
+        if (cfg.dac_type != "auto" && !cfg.dac_type.empty())
+            mgr->force_dac(cfg.dac_type, cfg.dac_address);
+        if (cfg.point_rate > 0)
+            mgr->set_point_rate(cfg.point_rate);
+        log::info("reconcile: starting DacManager id=%d type=%s addr=%s pps=%d ord=%d",
+                  cfg.id, cfg.dac_type.c_str(), cfg.dac_address.c_str(),
+                  cfg.point_rate, ord);
+        laser_managers_.emplace(cfg.id, mgr);
+        laser_ordinals_[cfg.id] = ord;
+        keep_ids.insert(cfg.id);
+        dacs_starting_.fetch_add(1, std::memory_order_relaxed);
+        std::thread([mgr, this]() mutable {
+            mgr->start();
+            dacs_starting_.fetch_sub(1, std::memory_order_release);
+        }).detach();
+    }
+
+    // ── 3. Stop managers for outputs no longer in the patch ───────────────────
+    {
+        std::vector<int> to_erase;
+        for (auto& [id, mgr] : laser_managers_) {
+            if (keep_ids.count(id) == 0) {
+                auto shared = mgr;
+                dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
+                std::thread([shared, this]() mutable {
+                    shared->stop();
+                    dacs_stopping_.fetch_sub(1, std::memory_order_release);
+                }).detach();
+                to_erase.push_back(id);
+            }
+        }
+        for (int id : to_erase) {
+            laser_managers_.erase(id);
+            laser_ordinals_.erase(id);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  check_output_health — background reconcile: every patched laser should have
 //  a DacManager in the map.  Only repairs if the manager is completely missing
 //  (not in laser_managers_) — we do NOT restart managers that exist but are
 //  still probing/connecting, since probe takes up to several seconds.
 // ─────────────────────────────────────────────────────────────────────────────
 void Application::Impl::check_output_health() {
-    if (dacs_stopping_.load(std::memory_order_acquire) > 0) return;  // patch change in flight
+    if (dacs_stopping_.load(std::memory_order_acquire) > 0) return;
+    if (dacs_starting_.load(std::memory_order_acquire) > 0) return;
     if (state.patched_outputs.empty()) return;
 
     bool needs_repair = false;
@@ -1547,22 +1609,22 @@ void Application::Impl::check_output_health() {
         }
     }
 
-    // ── 2. Detect managers that exist but whose output thread is stuck ───────
-    // is_healthy() returns true while the manager is still initialising
-    // (last_loop_ms_ == 0) so we never restart a manager mid-probe.
-    // Threshold: 3 s — well above the 33 ms keepalive interval and the
-    // ~150 ms EtherDream discovery window, so only truly stalled threads trigger.
-    // 10 s — with 8 concurrent DacManagers each doing a 2-second EtherDream scan
-    // plus HIDAPI and sidecar opens, 3 s was routinely breached by normal startup
-    // activity, causing false-positive evictions.  10 s still catches genuinely
-    // deadlocked output threads while eliminating false positives.
+    // ── 2. Detect managers that exist but are dead (zombie) or stuck ──────────
     static constexpr int64_t kStuckThresholdMs = 10000;
     std::vector<int> stuck_ids;
     for (const auto& po : state.patched_outputs) {
         if (po.type != OutputStreamType::Laser || !po.enabled) continue;
         auto it = laser_managers_.find(po.id);
         if (it == laser_managers_.end()) continue;  // already flagged above
-        if (!it->second->is_healthy(kStuckThresholdMs)) {
+        auto& mgr = it->second;
+        // Dead manager: not running and not in startup grace period
+        if (!mgr->is_running() && !mgr->is_starting()) {
+            log::warn("output_health: DacManager id=%d not running (zombie) — restarting", po.id);
+            stuck_ids.push_back(po.id);
+            continue;
+        }
+        // Stuck manager: running but output thread hasn't ticked in too long
+        if (!mgr->is_healthy(kStuckThresholdMs)) {
             log::warn("output_health: DacManager id=%d output thread stuck — restarting", po.id);
             stuck_ids.push_back(po.id);
         }
@@ -2627,17 +2689,25 @@ void Application::Impl::wire_callbacks() {
         // the included cue, update stream_prog_ so hardware output reflects the include.
         if (cue_idx < 0 || cue_idx >= (int)state.full_cue_list.size()) return;
         const FullCueEntry& fce = state.full_cue_list[cue_idx];
-        KeyframeLayer kf;
-        kf.objects       = layout_ctx.frame_editor.objects;
-        kf.symmetry_mode = static_cast<int>(layout_ctx.frame_editor.symmetry);
         for (const auto& [sid, sfx] : fce.per_stream_fx) {
             bool active = std::find(state.active_stream_ids.begin(),
                                     state.active_stream_ids.end(), sid)
                           != state.active_stream_ids.end();
             if (!active) {
+                // Use each stream's own per-stream objects from programmer_feeds
+                // (loaded from the cue's per_stream_kf during the INCL click handler).
+                // Falling back to the monolithic frame_editor content would latch the
+                // active stream's pattern onto every deselected head.
+                KeyframeLayer stream_kf;
+                const std::string sk = std::to_string(sid);
+                auto pf = layout_ctx.programmer_feeds.find(sk);
+                stream_kf.objects = (pf != layout_ctx.programmer_feeds.end())
+                                    ? pf->second.objects
+                                    : layout_ctx.frame_editor.objects;
+                stream_kf.symmetry_mode = static_cast<int>(layout_ctx.frame_editor.symmetry);
                 engine->send(cmd::LatchProgrammer{
                     { sid },
-                    kf,
+                    stream_kf,
                     layout_ctx.programmer_global,
                     sfx
                 });
@@ -2754,96 +2824,12 @@ void Application::Impl::wire_callbacks() {
     // SDL_Window per HDMI output).  NDI outputs are fully engine-managed.
     layout_cbs.on_output_patch_changed = [this](const std::vector<OutputStreamConfig>& configs) {
 
-        // ── 1. Build the set of ids present in the new patch ─────────────────
-        // Track which laser outputs exist and their ordinal bus index.
-        // The engine wires laser buses positionally (0th laser → bus_,
-        // 1st laser → extra_laser_buses_[0], …) so we must use the same ordinal.
-        std::unordered_map<int, int> laser_ordinal; // output_id -> bus ordinal
-        {
-            int ord = 0;
-            for (const auto& cfg : configs) {
-                if (cfg.type == OutputStreamType::Laser) {
-                    laser_ordinal[cfg.id] = ord++;
-                }
-            }
-        }
+        // ── 1+2+4: Reconcile DacManagers (create/reuse/stop as needed) ────────
+        reconcile_laser_managers(configs, /*allow_reuse=*/true);
 
-        // ── 2. Create new DacManagers for Laser outputs not yet in the map ───
-        for (const auto& cfg : configs) {
-            if (cfg.type != OutputStreamType::Laser) continue;
-
-            auto it = laser_managers_.find(cfg.id);
-            int ord = laser_ordinal[cfg.id];
-            if (it == laser_managers_.end()) {
-                // New laser output — create a DacManager draining the engine bus
-                // that corresponds to this output's positional laser slot.
-                RenderBus* bus = engine->extra_laser_bus(ord);
-                auto mgr = std::make_shared<DacManager>(*bus, ord);
-                // Apply explicit DAC config if provided
-                if (cfg.dac_type != "auto" && !cfg.dac_type.empty())
-                    mgr->force_dac(cfg.dac_type, cfg.dac_address);
-                if (cfg.point_rate > 0)
-                    mgr->set_point_rate(cfg.point_rate);
-                // Start on a background thread — never blocks the UI thread.
-                // BUG-B FIX: capture shared_ptr (not raw pointer) so the DacManager
-                // object stays alive until start() completes, even if a concurrent
-                // stop thread runs first and releases the map entry.  No delete in
-                // the stop thread — shared_ptr destructor handles lifetime.
-                log::info("dac: starting DacManager id=%d type=%s addr=%s pps=%d",
-                          cfg.id, cfg.dac_type.c_str(), cfg.dac_address.c_str(), cfg.point_rate);
-                laser_managers_.emplace(cfg.id, mgr);
-                dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
-                std::thread([mgr, this]() mutable {
-                    mgr->start();
-                    dacs_stopping_.fetch_sub(1, std::memory_order_release);
-                }).detach();
-                laser_ordinals_[cfg.id] = ord;
-            } else {
-                // Existing manager — check if the bus ordinal changed.
-                // If so, stop the old manager and recreate it on the new bus.
-                int prev_ord = laser_ordinals_.count(cfg.id) ? laser_ordinals_[cfg.id] : ord;
-                if (prev_ord != ord) {
-                    log::info("dac: laser ordinal changed for id=%d (%d->%d), recreating DacManager",
-                              cfg.id, prev_ord, ord);
-                    // Capture shared_ptr before erasing from map; no delete in thread.
-                    auto old_mgr = it->second;
-                    laser_managers_.erase(it);
-                    laser_ordinals_.erase(cfg.id);
-                    dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
-                    std::thread([old_mgr, this]() mutable {
-                        old_mgr->stop();
-                        dacs_stopping_.fetch_sub(1, std::memory_order_release);
-                    }).detach();
-                    // Recreate on the new bus
-                    RenderBus* bus = engine->extra_laser_bus(ord);
-                    auto mgr = std::make_shared<DacManager>(*bus, ord);
-                    if (cfg.dac_type != "auto" && !cfg.dac_type.empty())
-                        mgr->force_dac(cfg.dac_type, cfg.dac_address);
-                    if (cfg.point_rate > 0)
-                        mgr->set_point_rate(cfg.point_rate);
-                    log::info("dac: starting DacManager id=%d type=%s addr=%s pps=%d",
-                              cfg.id, cfg.dac_type.c_str(), cfg.dac_address.c_str(), cfg.point_rate);
-                    laser_managers_.emplace(cfg.id, mgr);
-                    dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
-                    std::thread([mgr, this]() mutable {
-                        mgr->start();
-                        dacs_stopping_.fetch_sub(1, std::memory_order_release);
-                    }).detach();
-                    laser_ordinals_[cfg.id] = ord;
-                } else {
-                    // Ordinal unchanged — apply any updated config
-                    if (cfg.dac_type != "auto" && !cfg.dac_type.empty())
-                        it->second->force_dac(cfg.dac_type, cfg.dac_address);
-                    if (cfg.point_rate > 0)
-                        it->second->set_point_rate(cfg.point_rate);
-                }
-            }
-        }
-
-        // ── 3. Create new SDL windows for HDMI outputs not yet in the map ────
+        // ── 3. Create new SDL windows for HDMI outputs not yet in the map ─────
         for (const auto& cfg : configs) {
             if (cfg.type != OutputStreamType::HDMI) continue;
-
             if (hdmi_windows_.find(cfg.id) == hdmi_windows_.end()) {
                 SDL_Window* w = SDL_CreateWindow(cfg.name.c_str(),
                                                  1920, 1080,
@@ -2856,41 +2842,6 @@ void Application::Impl::wire_callbacks() {
                     SDL_RaiseWindow(w);
                     hdmi_windows_[cfg.id] = w;
                 }
-            }
-        }
-
-        // ── 4. Stop and remove DacManagers for outputs no longer in the patch ─
-        // stop() can block for up to ~150ms (scan-thread wakeup + EtherDream probe),
-        // so we release ownership and stop on a background thread to keep the UI
-        // responsive. dacs_stopping_ counts in-flight stops; run_frame() shows an
-        // "Applying patch..." overlay while it is > 0.
-        {
-            std::vector<int> to_erase;
-            for (auto& [id, mgr] : laser_managers_) {
-                bool found = false;
-                for (const auto& cfg : configs)
-                    if (cfg.type == OutputStreamType::Laser && cfg.id == id)
-                        { found = true; break; }
-                if (!found) {
-                    // BUG-B FIX: capture the shared_ptr by value (not a raw
-                    // pointer).  The map entry is erased below, but the thread
-                    // holds its own reference so the DacManager stays alive until
-                    // stop() returns — even if a concurrent start thread is still
-                    // executing start() on the same object.  No explicit delete:
-                    // the shared_ptr destructor handles it when both threads drop
-                    // their references.
-                    auto shared = mgr;
-                    dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
-                    std::thread([shared, this]() mutable {
-                        shared->stop();
-                        dacs_stopping_.fetch_sub(1, std::memory_order_release);
-                    }).detach();
-                    to_erase.push_back(id);
-                }
-            }
-            for (int id : to_erase) {
-                laser_managers_.erase(id);
-                laser_ordinals_.erase(id);
             }
         }
 
@@ -2915,17 +2866,12 @@ void Application::Impl::wire_callbacks() {
         engine->send(cmd::SetOutputPatch{ configs });
 
         // ── 7. Compute active stream ids ──────────────────────────────────────
-        // Broadcast mode: send all enabled laser IDs so the engine knows the set.
-        // Per-output mode: programmer routing is owned by the streams panel
-        // (on_active_streams_changed). Here we only remove IDs that no longer
-        // exist in the patch — we never ADD new IDs in per-output mode.
         std::vector<int> new_active;
         if (state.broadcast_to_all) {
             for (const auto& cfg : configs)
                 if (cfg.type == OutputStreamType::Laser && cfg.enabled)
                     new_active.push_back(cfg.id);
         } else {
-            // Keep whatever the streams panel selected, but drop IDs no longer patched.
             for (int id : state.active_stream_ids) {
                 bool still_exists = false;
                 for (const auto& cfg : configs)
@@ -2937,7 +2883,7 @@ void Application::Impl::wire_callbacks() {
         engine->send(cmd::SetActiveStreams{ new_active });
         state.active_stream_ids = new_active;
 
-        // ── 8. Propagate CITP stream names into UIState ────────────────────────
+        // ── 8. Propagate CITP stream names into UIState ───────────────────────
         for (auto& po : state.patched_outputs) {
             if (po.type != OutputStreamType::Laser) continue;
             auto it = laser_managers_.find(po.id);
@@ -2945,9 +2891,6 @@ void Application::Impl::wire_callbacks() {
                 po.citp_stream_name = it->second->citp_stream_name();
         }
 
-        // Output patch changes are user edits — mark the project modified so
-        // autosave fires even when no cuelist content has changed.
-        // do_load_project resets this flag after all restoration is complete.
         state.project_dirty = true;
     };
 
@@ -3015,34 +2958,28 @@ void Application::Impl::wire_callbacks() {
     };
 
     // ── Reinit Streams — force full stop+restart of all DacManagers ──────────
-    // Triggered by the "Reinit" button in the STREAMS window.
-    // Pattern mirrors the do_load_project inline teardown: stop all managers
-    // without sending SetOutputPatch{{}} to the engine (which would create an
-    // unwanted legacy-mode window), then schedule a deferred re-apply via
-    // post_load_reinit_pending_ once all stop() threads have completed.
     layout_cbs.on_reinit_streams = [this]() {
         if (state.patched_outputs.empty()) return;
-        log::info("reinit_streams: stopping all DacManagers for full reinit");
-        // Stop and evict every existing DacManager asynchronously.
-        for (auto& [id, mgr] : laser_managers_) {
-            auto shared = mgr;
+        log::info("reinit_streams: forcing full reinit of all DacManagers");
+        engine->send(cmd::SetActiveStreams{{}});
+        std::vector<OutputStreamConfig> cfgs;
+        for (const auto& po : state.patched_outputs)
+            cfgs.push_back(po.config);
+        engine->send(cmd::SetOutputPatch{ cfgs });
+        // Stop all existing managers without creating new ones.  New managers
+        // are created by the deferred path in run_frame() once dacs_stopping_
+        // reaches zero, guaranteeing hardware is fully released first.
+        for (auto& kv : laser_managers_) {
+            auto old_mgr = kv.second;
             dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
-            std::thread([shared, this]() mutable {
-                shared->stop();
+            std::thread([old_mgr, this]() mutable {
+                old_mgr->stop();
                 dacs_stopping_.fetch_sub(1, std::memory_order_release);
             }).detach();
         }
         laser_managers_.clear();
         laser_ordinals_.clear();
-        // Blank active streams while managers are restarting.
-        // Do NOT send SetOutputPatch{{}} — see do_load_project teardown comment.
-        engine->send(cmd::SetActiveStreams{{}});
-        // Schedule rebuild: once dacs_stopping_ reaches 0, run_frame() will
-        // fire on_output_patch_changed(cfgs) to recreate all DacManagers and
-        // re-send SetOutputPatch + SetActiveStreams to the engine.
-        post_load_reinit_pending_    = true;
-        post_load_sync_guard_frames_ = 10;
-        log::info("reinit_streams: reinit pending — waiting for stops to complete");
+        post_load_reinit_pending_ = true;
     };
 
     layout_cbs.on_mirrored_streams_changed = [this](const std::vector<int>& ids) {
@@ -3681,31 +3618,8 @@ bool Application::Impl::init() {
         for (const auto& po : state.patched_outputs)
             init_cfgs.push_back(po.config);
 
-        // Create DacManagers for all Laser outputs.
-        // BUG-A FIX: track every start thread in dacs_stopping_ (same as the
-        // on_output_patch_changed path) so that the first do_load_project's
-        // teardown wait includes these threads and cannot delete the manager
-        // while start() is still pending execution.  Capture a shared_ptr in the
-        // thread lambda so the object stays alive until start() completes.
-        int laser_ord = 0;
-        for (const auto& cfg : init_cfgs) {
-            if (cfg.type != OutputStreamType::Laser) continue;
-            int citp_ord = laser_ord++;
-            RenderBus* bus = engine->extra_laser_bus(citp_ord);
-            auto mgr = std::make_shared<DacManager>(*bus, citp_ord);
-            if (cfg.dac_type != "auto" && !cfg.dac_type.empty())
-                mgr->force_dac(cfg.dac_type, cfg.dac_address);
-            if (cfg.point_rate > 0)
-                mgr->set_point_rate(cfg.point_rate);
-            log::info("init: started DacManager for output id=%d", cfg.id);
-            laser_managers_.emplace(cfg.id, mgr);
-            laser_ordinals_[cfg.id] = citp_ord;
-            dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
-            std::thread([mgr, this]() mutable {
-                mgr->start();
-                dacs_stopping_.fetch_sub(1, std::memory_order_release);
-            }).detach();
-        }
+        // Create DacManagers for all Laser outputs via the unified reconcile path.
+        reconcile_laser_managers(init_cfgs, /*allow_reuse=*/false);
 
         // Create SDL windows for HDMI outputs
         for (const auto& cfg : init_cfgs) {
@@ -4137,42 +4051,52 @@ void Application::Impl::run_frame() {
     // DAC connection status (will come from real subsystems later)
     state.dac_connected = false;
 
-    // ── Post-load / reinit deferred re-apply ──────────────────────────────────
-    // Once all DacManager start() threads have finished (dacs_stopping_ == 0),
-    // fire one final on_output_patch_changed() with the full current patch.
-    // This ensures:
-    //   • The engine has an up-to-date SetOutputPatch with correct bus pointers
-    //   • SetActiveStreams with the restored active_stream_ids is re-sent
-    //   • Any DacManager that failed to start is re-created by the callback's
-    //     "absent manager" detection (same logic as check_output_health repair)
-    // The flag is set by do_load_project and by on_reinit_streams.
-    if (post_load_reinit_pending_ && dacs_stopping_.load(std::memory_order_acquire) == 0) {
+    // ── Post-load / reinit deferred SetActiveStreams re-send ──────────────────
+    // Once all stop AND start threads have finished, re-send SetActiveStreams with
+    // the current state. Also re-detects any managers that failed to start.
+    if (post_load_reinit_pending_
+        && dacs_stopping_.load(std::memory_order_acquire) == 0
+        && dacs_starting_.load(std::memory_order_acquire) == 0)
+    {
         post_load_reinit_pending_ = false;
-        log::info("run_frame: post-load stream re-init (deferred)");
-        if (layout_cbs.on_output_patch_changed && !state.patched_outputs.empty()) {
-            std::vector<OutputStreamConfig> reinit_cfgs;
-            reinit_cfgs.reserve(state.patched_outputs.size());
-            for (const auto& po : state.patched_outputs)
-                reinit_cfgs.push_back(po.config);
-            layout_cbs.on_output_patch_changed(reinit_cfgs);
-            // Guard active_stream_ids against stale snapshot one more time
-            // since this re-apply sends new SetActiveStreams to the engine.
-            post_load_sync_guard_frames_ = std::max(post_load_sync_guard_frames_, 5);
+        log::info("run_frame: post-load deferred SetActiveStreams re-send");
+        if (!state.patched_outputs.empty()) {
+            std::vector<OutputStreamConfig> cfgs;
+            bool needs_reconcile = false;
+            for (const auto& po : state.patched_outputs) {
+                cfgs.push_back(po.config);
+                if (po.type != OutputStreamType::Laser) continue;
+                auto it = laser_managers_.find(po.id);
+                if (it == laser_managers_.end()
+                    || (!it->second->is_running() && !it->second->is_starting())) {
+                    needs_reconcile = true;
+                    log::warn("post-load: DacManager id=%d needs restart", po.id);
+                }
+            }
+            if (needs_reconcile)
+                reconcile_laser_managers(cfgs, /*allow_reuse=*/false);
+            std::vector<int> active;
+            if (state.broadcast_to_all) {
+                for (const auto& po : state.patched_outputs)
+                    if (po.type == OutputStreamType::Laser && po.enabled)
+                        active.push_back(po.id);
+            } else {
+                active = state.active_stream_ids;
+            }
+            engine->send(cmd::SetActiveStreams{ active });
+            state.active_stream_ids = active;
         }
     }
 
     // ── Output health check — every 5 seconds ──────────────────────────────────
-    // Suppressed during the post-load window (post_load_reinit_pending_ or
-    // post_load_sync_guard_frames_ > 0) so that concurrent starts triggered by
-    // do_load_project or on_reinit_streams don't look "stuck" to the health check
-    // before they have had a chance to complete their EtherDream / HIDAPI scans.
-    // do_load_project resets last_health_check_ms_ so the 5-second window starts
-    // fresh from the end of load, not from whenever the previous check fired.
+    // Suppressed while any start/stop threads are in flight (dacs_starting_ or
+    // dacs_stopping_ > 0) and during the post-load reinit window.
     {
         Uint64 now = SDL_GetTicks();
         if (now - last_health_check_ms_ >= 5000u
             && !post_load_reinit_pending_
-            && post_load_sync_guard_frames_ == 0)
+            && dacs_stopping_.load(std::memory_order_relaxed) == 0
+            && dacs_starting_.load(std::memory_order_relaxed) == 0)
         {
             last_health_check_ms_ = now;
             check_output_health();
@@ -4306,8 +4230,13 @@ void Application::Impl::run_frame() {
     }
 
     // ── Output patch applying overlay ─────────────────────────────────────────
-    // Shown every frame while background DacManager::stop() threads are running.
-    if (dacs_stopping_.load(std::memory_order_relaxed) > 0) {
+    {
+        bool stopping = dacs_stopping_.load(std::memory_order_relaxed) > 0;
+        bool starting  = dacs_starting_.load(std::memory_order_relaxed) > 0;
+        if (stopping || starting) {
+        const char* overlay_label = (stopping && starting) ? "Restarting outputs..."
+                                  : stopping               ? "Stopping outputs..."
+                                                           : "Starting outputs...";
         ImGuiIO& pio = ImGui::GetIO();
         ImGui::SetNextWindowPos(ImVec2(0.f, 0.f));
         ImGui::SetNextWindowSize(pio.DisplaySize, ImGuiCond_Always);
@@ -4324,8 +4253,8 @@ void Application::Impl::run_frame() {
 
         static const char* kSpin[] = { "|", "/", "-", "\\" };
         int spin_idx = static_cast<int>(ImGui::GetTime() * 5.0) & 3;
-        char full[48]{};
-        std::snprintf(full, sizeof(full), "Applying patch... %s", kSpin[spin_idx]);
+        char full[64]{};
+        std::snprintf(full, sizeof(full), "%s %s", overlay_label, kSpin[spin_idx]);
 
         ImGui::SetWindowFontScale(1.6f);
         ImVec2 ts  = ImGui::CalcTextSize(full);
@@ -4361,7 +4290,8 @@ void Application::Impl::run_frame() {
         }
 #endif
         return;
-    }
+        } // if (stopping || starting)
+    } // overlay block
 
     // ── EULA / Safety gate ────────────────────────────────────────────────────
     // Must be accepted before any laser output or main UI is shown.
