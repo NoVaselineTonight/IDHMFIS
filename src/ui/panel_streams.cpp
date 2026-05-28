@@ -697,6 +697,22 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                             static_cast<int>(state.active_stream_ids.size()));
     }
 
+    // ── REINIT STREAMS ────────────────────────────────────────────────────────
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.22f, 0.13f, 0.02f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.58f, 0.34f, 0.06f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.16f, 0.09f, 0.02f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f,  0.72f, 0.15f, 1.0f));
+    if (ImGui::Button("REINIT##sreinit")) {
+        if (cbs.on_reinit_streams) cbs.on_reinit_streams();
+    }
+    ImGui::PopStyleColor(4);
+    ImGui::SetItemTooltip(
+        "Re-initialize all output streams.\n"
+        "Stops every DAC manager and restarts them from scratch.\n"
+        "Use when streams are not sending after loading a show,\n"
+        "or when Capture 2024 / DAC hardware loses its connection.");
+
     // ── AUTO GROUPS ───────────────────────────────────────────────────────────
     // Compact button → popup: generates symmetrical groups from the output layout.
     {
