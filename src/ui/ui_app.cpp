@@ -547,6 +547,18 @@ struct Application::Impl {
     // final SetActiveStreams to ensure the engine has the correct active streams.
     bool post_load_reinit_pending_    = false;
 
+    // ── REINIT active-stream capture ──────────────────────────────────────────
+    // on_reinit_streams sends SetActiveStreams{{}} during teardown, which wipes
+    // the engine's programmer routing.  The async deferred recreate spans many
+    // frames during which panels (STREAMS/OUTPUTS/groups) keep running and can
+    // mutate state.active_stream_ids, so the deferred restore cannot rely on it.
+    // Snapshot the pre-REINIT routing here BEFORE sending SetActiveStreams{{}} and
+    // restore from it once the managers are back up.  reinit_capture_valid_ flags
+    // a manual REINIT (vs. a plain post-load) so the deferred path knows to use it.
+    bool             reinit_capture_valid_       = false;
+    bool             reinit_saved_broadcast_all_ = true;
+    std::vector<int> reinit_saved_active_ids_;
+
     // ── Output health check epoch ─────────────────────────────────────────────
     // Last tick (SDL_GetTicks) when check_output_health() ran successfully.
     // Stored as a member so do_load_project can reset it, ensuring the health
@@ -1169,7 +1181,10 @@ void Application::Impl::do_load_project(const std::string& path) {
                 cfgs.reserve(state.patched_outputs.size());
                 for (const auto& po : state.patched_outputs)
                     cfgs.push_back(po.config);
-                // allow_reuse=true: keep managers for identical hardware to avoid USB teardown.
+                // Reconcile managers: keep healthy managers whose IDs are unchanged,
+                // stop only evicted managers, start only new IDs.  This avoids the
+                // concurrent stop+start race that occurred when all managers were torn
+                // down unconditionally and new ones raced to claim the same USB device.
                 reconcile_laser_managers(cfgs, /*allow_reuse=*/true);
                 engine->send(cmd::SetOutputPatch{ cfgs });
                 std::vector<int> new_active;
@@ -1183,8 +1198,8 @@ void Application::Impl::do_load_project(const std::string& path) {
                 engine->send(cmd::SetActiveStreams{ new_active });
                 state.active_stream_ids = new_active;
             }
-            // Schedule a deferred SetActiveStreams re-send once all managers finish
-            // starting, to guarantee correct routing after slow hardware (EtherDream).
+            // Deferred path in run_frame() re-sends SetOutputPatch + SetActiveStreams
+            // once all stop/start threads have settled, guaranteeing final state is clean.
             post_load_reinit_pending_ = true;
         }
         // Restore output groups
@@ -1523,7 +1538,7 @@ void Application::Impl::reconcile_laser_managers(
                 laser_ordinals_.erase(cfg.id);
                 dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
                 std::thread([old_mgr, this]() mutable {
-                    old_mgr->stop();
+                    try { old_mgr->stop(); } catch (...) { log::warn("DacManager: stop() threw an exception"); }
                     dacs_stopping_.fetch_sub(1, std::memory_order_release);
                 }).detach();
                 it = laser_managers_.end();
@@ -1560,7 +1575,7 @@ void Application::Impl::reconcile_laser_managers(
         keep_ids.insert(cfg.id);
         dacs_starting_.fetch_add(1, std::memory_order_relaxed);
         std::thread([mgr, this]() mutable {
-            mgr->start();
+            try { mgr->start(); } catch (...) { log::warn("DacManager: start() threw an exception"); }
             dacs_starting_.fetch_sub(1, std::memory_order_release);
         }).detach();
     }
@@ -1573,7 +1588,7 @@ void Application::Impl::reconcile_laser_managers(
                 auto shared = mgr;
                 dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
                 std::thread([shared, this]() mutable {
-                    shared->stop();
+                    try { shared->stop(); } catch (...) { log::warn("DacManager: stop() threw an exception"); }
                     dacs_stopping_.fetch_sub(1, std::memory_order_release);
                 }).detach();
                 to_erase.push_back(id);
@@ -1641,7 +1656,7 @@ void Application::Impl::check_output_health() {
         laser_ordinals_.erase(id);
         dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
         std::thread([shared, this]() mutable {
-            shared->stop();
+            try { shared->stop(); } catch (...) { log::warn("DacManager: stop() threw an exception"); }
             dacs_stopping_.fetch_sub(1, std::memory_order_release);
         }).detach();
         needs_repair = true;
@@ -2251,8 +2266,10 @@ void Application::Impl::wire_callbacks() {
 
     // Inspector param edits → engine command
     layout_cbs.on_param_changed = [this](const char* name, float val) {
-        if (state.active_cue_idx >= 0)
+        if (state.active_cue_idx >= 0) {
             engine->send(cmd::SetGeneratorParam{ state.active_cue_idx, name, val });
+            state.project_dirty = true;
+        }
     };
 
     // Master intensity slider
@@ -2270,15 +2287,19 @@ void Application::Impl::wire_callbacks() {
     // FX engine controls
     layout_cbs.on_fx_param_changed = [this](int ci, int fi, const char* p, float v) {
         engine->send(cmd::SetFxParam{ ci, fi, std::string(p), v });
+        state.project_dirty = true;
     };
     layout_cbs.on_fx_enabled  = [this](int ci, int fi, bool en) {
         engine->send(cmd::SetFxEnabled{ ci, fi, en });
+        state.project_dirty = true;
     };
     layout_cbs.on_fx_bypassed = [this](int ci, int fi, bool bp) {
         engine->send(cmd::SetFxBypassed{ ci, fi, bp });
+        state.project_dirty = true;
     };
     layout_cbs.on_fx_wet      = [this](int ci, int fi, float w) {
         engine->send(cmd::SetFxWet{ ci, fi, w });
+        state.project_dirty = true;
     };
 
     // §B6: BPM — only explicit user interaction changes BPM in the engine
@@ -2297,18 +2318,23 @@ void Application::Impl::wire_callbacks() {
     };
     layout_cbs.on_record_cue = [this](const std::string& name, float fi, float fo) {
         engine->send(cmd::RecordCue{name, fi, fo});
+        state.project_dirty = true;
     };
     layout_cbs.on_delete_cue = [this](int idx) {
         engine->send(cmd::DeleteCue{idx});
+        state.project_dirty = true;
     };
     layout_cbs.on_set_cue_timing = [this](int idx, float fi, float fo, float di, float hold) {
         engine->send(cmd::SetCueTiming{idx, fi, fo, di, hold});
+        state.project_dirty = true;
     };
     layout_cbs.on_rename_cue = [this](int idx, const std::string& name) {
         engine->send(cmd::RenameCue{idx, name});
+        state.project_dirty = true;
     };
     layout_cbs.on_move_cue = [this](int from_idx, int to_idx) {
         engine->send(cmd::MoveCue{from_idx, to_idx});
+        state.project_dirty = true;
     };
 
     // Output kill switch
@@ -2915,14 +2941,14 @@ void Application::Impl::wire_callbacks() {
                 // Check if there is actually programmer content to latch
                 bool has_objects = !kf.objects.empty();
                 bool has_global_fx = !layout_ctx.programmer_global.fx.empty();
-                // Use per-stream FX if available, otherwise fall back to global programmer FX
-                const std::string stream_key = std::to_string(old_id);
+                // Freeze EXACTLY what this head was showing while selected.  The live
+                // active render (programmer_pts_live in build_frame) uses the monolithic
+                // programmer_fx_layer for every selected head — it never reads per-stream
+                // feeds.  programmer_feeds[sid].fx is only a discrete snapshot of
+                // programmer_fx_layer taken at record/include time and can be STALE after
+                // later FX edits, so latching it would change the FX on deselect.  Latch
+                // the live programmer_fx_layer (same source SetProgrammerFrame sends).
                 FxLayer latch_fx = layout_ctx.programmer_fx_layer;
-                auto feed_it = layout_ctx.programmer_feeds.find(stream_key);
-                bool has_stream_fx = (feed_it != layout_ctx.programmer_feeds.end() &&
-                                      !feed_it->second.fx.fx.empty());
-                if (has_stream_fx)
-                    latch_fx = feed_it->second.fx;
                 bool has_fx = !latch_fx.fx.empty();
                 // Only latch if there is content to preserve
                 if (has_objects || has_global_fx || has_fx) {
@@ -2961,6 +2987,14 @@ void Application::Impl::wire_callbacks() {
     layout_cbs.on_reinit_streams = [this]() {
         if (state.patched_outputs.empty()) return;
         log::info("reinit_streams: forcing full reinit of all DacManagers");
+        // Capture the pre-REINIT programmer routing BEFORE wiping it, so the
+        // deferred recreate path can restore SetActiveStreams once the managers
+        // are back up.  Relying on state.active_stream_ids at restore time is
+        // unsafe — panels keep running during the multi-frame async teardown and
+        // can mutate it, which would silently drop programmer output on resume.
+        reinit_saved_broadcast_all_ = state.broadcast_to_all;
+        reinit_saved_active_ids_    = state.active_stream_ids;
+        reinit_capture_valid_       = true;
         engine->send(cmd::SetActiveStreams{{}});
         std::vector<OutputStreamConfig> cfgs;
         for (const auto& po : state.patched_outputs)
@@ -2973,7 +3007,7 @@ void Application::Impl::wire_callbacks() {
             auto old_mgr = kv.second;
             dacs_stopping_.fetch_add(1, std::memory_order_relaxed);
             std::thread([old_mgr, this]() mutable {
-                old_mgr->stop();
+                try { old_mgr->stop(); } catch (...) { log::warn("DacManager: stop() threw an exception"); }
                 dacs_stopping_.fetch_sub(1, std::memory_order_release);
             }).detach();
         }
@@ -2991,16 +3025,19 @@ void Application::Impl::wire_callbacks() {
     layout_cbs.on_timeline_create = [this](TimelineDef def) {
         project->timelines.push_back(def);
         engine->send(cmd::CreateTimeline{ std::move(def) });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_delete = [this](const std::string& id) {
         auto it = std::find_if(project->timelines.begin(), project->timelines.end(),
                                [&](const TimelineDef& d){ return d.id == id; });
         if (it != project->timelines.end()) project->timelines.erase(it);
         engine->send(cmd::DeleteTimeline{ id });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_rename = [this](const std::string& id, const std::string& name) {
         for (auto& d : project->timelines) if (d.id == id) { d.name = name; break; }
         engine->send(cmd::RenameTimeline{ id, name });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_set_armed = [this](const std::string& id, bool armed) {
         engine->send(cmd::SetTimelineArmed{ id, armed });
@@ -3027,40 +3064,49 @@ void Application::Impl::wire_callbacks() {
                                                 const std::string& slot) {
         for (auto& d : project->timelines) if (d.id == id) { d.tc_slot = slot; break; }
         engine->send(cmd::SetTimelineSource{ id, slot });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_set_link = [this](const std::string& id, bool link) {
         for (auto& d : project->timelines) if (d.id == id) { d.link_mode = link; break; }
         engine->send(cmd::SetTimelineLink{ id, link });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_set_offset = [this](const std::string& id, int64_t off) {
         for (auto& d : project->timelines)
             if (d.id == id) { d.time_offset_frames = off; break; }
         engine->send(cmd::SetTimelineOffset{ id, off });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_add_track = [this](const std::string& tid,
                                                const std::string& name) {
         engine->send(cmd::AddTimelineTrack{ tid, name });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_remove_track = [this](const std::string& tid, int track_id) {
         engine->send(cmd::RemoveTimelineTrack{ tid, track_id });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_update_track = [this](const std::string& tid,
                                                   int track_id,
                                                   std::string name,
                                                   bool muted, bool locked, bool collapsed) {
         engine->send(cmd::UpdateTimelineTrack{ tid, track_id, name, muted, locked, collapsed });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_add_event = [this](const std::string& tid, int track_id,
                                                TimelineEvent ev) {
         engine->send(cmd::AddTimelineEvent{ tid, track_id, std::move(ev) });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_remove_event = [this](const std::string& tid, int track_id,
                                                    int64_t event_id) {
         engine->send(cmd::RemoveTimelineEvent{ tid, track_id, event_id });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_update_event = [this](const std::string& tid, int track_id,
                                                    TimelineEvent ev) {
         engine->send(cmd::UpdateTimelineEvent{ tid, track_id, std::move(ev) });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_wait_for_go = [this](const std::string& id) {
         engine->send(cmd::TimelineWaitForGoAdvance{ id });
@@ -3068,15 +3114,18 @@ void Application::Impl::wire_callbacks() {
     layout_cbs.on_tc_config_changed = [this](ProjectTimecodeConfig cfg) {
         project->tc_config = cfg;
         engine->send(cmd::SetTimecodeSettings{ std::move(cfg) });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_set_audio = [this](const std::string& id, AudioTrackDef track) {
         // Compute peak envelope here on the UI thread (blocking decode is fine here;
         // it must NOT happen on the 1000 Hz engine thread).
         std::vector<float> peaks = audio_compute_peaks(track.file_path);
         engine->send(cmd::SetTimelineAudio{ id, std::move(track), std::move(peaks) });
+        state.project_dirty = true;
     };
     layout_cbs.on_timeline_clear_audio = [this](const std::string& id) {
         engine->send(cmd::ClearTimelineAudio{ id });
+        state.project_dirty = true;
     };
 }
 
@@ -3682,6 +3731,7 @@ bool Application::Impl::init() {
                 po.citp_stream_name = it->second->citp_stream_name();
         }
     }
+    post_load_reinit_pending_ = true;
 
     // Auto-initialize NDI output with project defaults
     engine->send(cmd::SetNdiConfig{
@@ -4066,25 +4116,50 @@ void Application::Impl::run_frame() {
             for (const auto& po : state.patched_outputs) {
                 cfgs.push_back(po.config);
                 if (po.type != OutputStreamType::Laser) continue;
-                auto it = laser_managers_.find(po.id);
-                if (it == laser_managers_.end()
-                    || (!it->second->is_running() && !it->second->is_starting())) {
+                if (laser_managers_.find(po.id) == laser_managers_.end()) {
                     needs_reconcile = true;
-                    log::warn("post-load: DacManager id=%d needs restart", po.id);
+                    log::warn("post-load: DacManager id=%d missing — creating", po.id);
                 }
             }
-            if (needs_reconcile)
-                reconcile_laser_managers(cfgs, /*allow_reuse=*/false);
-            std::vector<int> active;
-            if (state.broadcast_to_all) {
-                for (const auto& po : state.patched_outputs)
-                    if (po.type == OutputStreamType::Laser && po.enabled)
-                        active.push_back(po.id);
-            } else {
-                active = state.active_stream_ids;
+            // Always re-send SetOutputPatch so the engine's stream_defs_ / output_streams_
+            // are never stale, regardless of whether any manager was missing.  This is
+            // the fix for the deferred-path invariant: SetOutputPatch must precede
+            // SetActiveStreams on every invocation, not only on the first one.
+            engine->send(cmd::SetOutputPatch{ cfgs });
+            if (needs_reconcile) {
+                reconcile_laser_managers(cfgs, /*allow_reuse=*/true);
             }
-            engine->send(cmd::SetActiveStreams{ active });
-            state.active_stream_ids = active;
+            // reconcile may have spawned start threads; if so, re-arm the flag
+            // so SetActiveStreams is deferred until the managers are actually up.
+            if (dacs_starting_.load(std::memory_order_acquire) > 0) {
+                post_load_reinit_pending_ = true;
+            } else {
+                // Choose the routing to restore.  After a manual REINIT use the
+                // snapshot captured before SetActiveStreams{{}} (the live
+                // state.active_stream_ids may have been mutated by panels during
+                // the async teardown).  Otherwise (plain post-load) use the live
+                // state, which do_load_project already restored from the project.
+                bool use_broadcast = reinit_capture_valid_
+                                   ? reinit_saved_broadcast_all_
+                                   : state.broadcast_to_all;
+                std::vector<int> active;
+                if (use_broadcast) {
+                    for (const auto& po : state.patched_outputs)
+                        if (po.type == OutputStreamType::Laser && po.enabled)
+                            active.push_back(po.id);
+                } else if (reinit_capture_valid_) {
+                    // Keep only captured ids that still exist in the patch.
+                    for (int id : reinit_saved_active_ids_)
+                        for (const auto& po : state.patched_outputs)
+                            if (po.id == id) { active.push_back(id); break; }
+                } else {
+                    active = state.active_stream_ids;
+                }
+                state.broadcast_to_all = use_broadcast;
+                engine->send(cmd::SetActiveStreams{ active });
+                state.active_stream_ids = active;
+                reinit_capture_valid_ = false;
+            }
         }
     }
 

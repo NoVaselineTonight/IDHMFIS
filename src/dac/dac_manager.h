@@ -75,10 +75,15 @@ public:
     // Distinguishes a freshly-started manager from a zombie (stop_requested_ set
     // but running_ still false) so the health checker won't false-positive on startup.
     bool is_starting() const {
-        if (!running_.load(std::memory_order_acquire)) return false;
+        // Output thread has ticked — fully running, not starting.
         if (last_loop_ms_.load(std::memory_order_relaxed) != 0) return false;
+        // start() has never been called.
         int64_t started = started_at_ms_.load(std::memory_order_relaxed);
         if (started == 0) return false;
+        // start() was called recently.  running_ may still be false in the gap
+        // between start() returning and the output thread executing its first
+        // iteration — this is intentionally checked AFTER last_loop_ms_ so a
+        // fully-running manager is never mistaken for "still starting".
         int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         return (now_ms - started) < 30000;

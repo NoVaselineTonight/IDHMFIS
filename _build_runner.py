@@ -21,16 +21,22 @@ BUILD_NUM_FILE = os.path.join(SRC, "build_number.txt")
 VERSION_H      = os.path.join(SRC, "src", "version.h")
 
 # ── Increment build number ────────────────────────────────────────────────────
+# If build_number.txt contains a non-numeric string, use it as a literal version
+# (no increment). This allows special version names like "5.20.FUCKTHIS".
+# Numeric strings are incremented by 0.01 as usual.
 try:
     with open(BUILD_NUM_FILE, "r") as f:
-        build_num = round(float(f.read().strip()) + 0.01, 2)
+        raw = f.read().strip()
+    build_num = round(float(raw) + 0.01, 2)
+    version_str = f"{build_num:.2f}"
+    new_num_content = f"{build_num:.2f}\n"
 except Exception:
-    build_num = 3.10
+    version_str = raw if raw else "3.10"
+    new_num_content = f"{version_str}\n"
 
 with open(BUILD_NUM_FILE, "w") as f:
-    f.write(f"{build_num:.2f}\n")
+    f.write(new_num_content)
 
-version_str = f"{build_num:.2f}"
 with open(VERSION_H, "w") as f:
     f.write(f'#pragma once\n#define IDHMFIS_VERSION "{version_str}"\n')
 

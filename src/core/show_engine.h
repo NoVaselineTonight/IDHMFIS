@@ -844,6 +844,16 @@ private:
     // Static helper to render a KeyframeLayer to a PointBuffer
     static PointBuffer render_keyframe_layer(const KeyframeLayer& kf, int target_pts);
 
+    // Target refresh rate (Hz) for keyframe/programmer geometry. A laser DAC
+    // continuously re-traces the current frame at point_rate_ pps, so a frame of
+    // N points refreshes at point_rate_/N Hz. Budgeting point_rate_/kProgrammerRefreshHz
+    // points per frame yields ~kProgrammerRefreshHz Hz, avoiding the slow,
+    // laser-by-laser come-up that a too-large budget (e.g. point_rate_/4 => 4 Hz)
+    // produced. SINGLE source of truth: all programmer/playback/latched render
+    // sites MUST pass programmer_point_budget() so live == playback == latched.
+    static constexpr int kProgrammerRefreshHz = 30;
+    int programmer_point_budget() const { return point_rate_ / kProgrammerRefreshHz; }
+
 public:
     uint64_t watchdog_heartbeat() const {
         return watchdog_heartbeat_.load(std::memory_order_relaxed);

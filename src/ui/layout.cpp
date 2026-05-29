@@ -4554,15 +4554,11 @@ static void fs_fill_polygon(
             float row_len = xr - xl;
             int n_pts = std::max(2, static_cast<int>(row_len / pt_spacing) + 1);
 
-            // Add blanked travel point before row (unless very first point)
+            // Pen-up between rows: duplicate the previous row's last point so the
+            // renderer blanks the travel LEAVING the duplicate (the jump to this
+            // row's start), keeping the inter-row move dark instead of a ghost line.
             if (!first_pt) {
-                float tx = row_dir ? xl : xr;
-                obj.pts.push_back({tx, y});
-                // Mark as blanked by not including it in lit pts: we use
-                // a workaround: add as a duplicate (laser dwells blanked between segments).
-                // Since show_engine renders Line as a pure polyline, we duplicate
-                // the first point of the new row to force a "blank" transition.
-                // We just push a second identical point (minimal dwell) here.
+                obj.pts.push_back(obj.pts.back());
             }
 
             float x_start = row_dir ? xl : xr;
@@ -6575,13 +6571,24 @@ void panel_frame_editor(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs
         }
 
         // ── Canvas input handling ─────────────────────────────────────────────────
+        // On the MB1-release frame IsMouseDown(Left) is already false, so if the
+        // cursor is OFF the canvas at release (e.g. the marquee was dragged past the
+        // canvas edge) the per-tool `if (lmb_released)` resets below would be skipped
+        // and the drag/box state (box_selecting, obj_dragging, ...) would latch
+        // forever — the "sticky select tool that doesn't go away on release" bug.
+        // Include the release frame whenever any drag/box is in progress so the
+        // release handlers always run and clear the state.
+        bool fe_drag_in_progress = fe.obj_dragging || fe.box_selecting ||
+                                   fe.rot_dragging  || fe.scale_dragging ||
+                                   fe.gs_dragging   || fe.lasso_active;
         bool canvas_input_active = (canvas_hovered ||
             (fe.obj_dragging   && ImGui::IsMouseDown(ImGuiMouseButton_Left)) ||
             (fe.box_selecting  && ImGui::IsMouseDown(ImGuiMouseButton_Left)) ||
             (fe.rot_dragging   && ImGui::IsMouseDown(ImGuiMouseButton_Left)) ||
             (fe.scale_dragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) ||
             (fe.gs_dragging    && ImGui::IsMouseDown(ImGuiMouseButton_Left)) ||
-            (fe.lasso_active   && ImGui::IsMouseDown(ImGuiMouseButton_Left)));
+            (fe.lasso_active   && ImGui::IsMouseDown(ImGuiMouseButton_Left)) ||
+            (fe_drag_in_progress && lmb_released));
 
         if (canvas_input_active) {
             float nmx = s2nx(mouse_pos.x);

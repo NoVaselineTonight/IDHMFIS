@@ -630,9 +630,19 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
 
         float dummy_w = std::max(ruler_orig.x + kLeftPad + ruler_w - wpos.x, 1.f);
         ImGui::InvisibleButton("##ruler_seek", { dummy_w, ruler_h });
+        // Click-HOLD-drag on the timestamps strip pans the view horizontally
+        // (Bug 8).  A quick click without movement still seeks the playhead, so
+        // both interactions coexist: drag wins once the mouse actually moves.
         if (ImGui::IsItemActive() &&
-            (ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
-             ImGui::IsMouseDragging(ImGuiMouseButton_Left))) {
+            ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            float dx = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x;
+            // Dragging right reveals earlier frames, so subtract the delta.
+            ctx.timeline_view_scroll -= static_cast<double>(dx) / static_cast<double>(kZoom);
+            // !(x > 0.0) catches both x <= 0 and NaN
+            if (!(ctx.timeline_view_scroll > 0.0)) ctx.timeline_view_scroll = 0.0;
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left); // make delta incremental
+        } else if (ImGui::IsItemActive() &&
+                   ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             float mx = ImGui::GetMousePos().x;
             float rx = ruler_orig.x + kLeftPad;  // ruler content start x
             if (mx >= rx) {
@@ -807,15 +817,21 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
             !ctx.timeline_selected_event_ids.empty() &&
             ctx.timeline_selected_track_id >= 0 &&
             cbs.on_timeline_remove_event) {
-            for (int64_t tc : ctx.timeline_selected_event_ids)
-                cbs.on_timeline_remove_event(tl.id, ctx.timeline_selected_track_id, tc);
+            for (int64_t eid : ctx.timeline_selected_event_ids)
+                cbs.on_timeline_remove_event(tl.id, ctx.timeline_selected_track_id, eid);
             ctx.timeline_selected_event_ids.clear();
         }
 
         // Persistent state for the right-click context popup (survives across frames
-        // while the popup is open).  Updated the frame a right-click on an event is detected.
-        static int64_t s_ctx_clicked_tc    = -1;
+        // while the popup is open).  Holds the event id (not tc_position) so the
+        // delete callback matches the engine, which keys events by id.
+        static int64_t s_ctx_clicked_id    = -1;
         static int     s_ctx_clicked_track = -1;
+
+        // Persistent state for dragging an event horizontally along its track
+        // (Bug 9a).  Identifies which event id, on which track, is being dragged.
+        static int64_t s_drag_event_id = -1;
+        static int     s_drag_track    = -1;
 
         for (const auto& track : tl.tracks) {
             bool track_sel = (ctx.timeline_selected_track_id == track.id);
@@ -850,10 +866,29 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
             bool lane_clicked_l = ImGui::IsItemClicked(ImGuiMouseButton_Left);
             bool lane_clicked_r = ImGui::IsItemClicked(ImGuiMouseButton_Right);
             bool lane_hovered   = ImGui::IsItemHovered();
+            bool lane_active    = ImGui::IsItemActive();
+            bool lane_activated = ImGui::IsItemActivated();
             ImVec2 mouse_pos    = ImGui::GetMousePos();
 
             // Draw events and detect clicks
-            int64_t clicked_tc = -1;  // TC of event clicked this frame (-1 = none)
+            int64_t clicked_id = -1;  // id of event clicked this frame (-1 = none)
+            // On the frame the lane is first pressed (not in REM mode), arm a drag
+            // for the event nearest the cursor so it can be repositioned (Bug 9a).
+            if (lane_activated && !state.rem_mode) {
+                int64_t nearest_id = -1;
+                float   nearest_dx = 10.f;
+                for (const auto& ev : track.events) {
+                    float ex = lane_orig.x +
+                               static_cast<float>(ev.tc_position - ctx.timeline_view_scroll)
+                               * kZoom2;
+                    float d = std::fabs(mouse_pos.x - ex);
+                    if (d < nearest_dx) { nearest_dx = d; nearest_id = ev.id; }
+                }
+                if (nearest_id >= 0) {
+                    s_drag_event_id = nearest_id;
+                    s_drag_track    = track.id;
+                }
+            }
             for (const auto& ev : track.events) {
                 float ex = lane_orig.x +
                            static_cast<float>(ev.tc_position - ctx.timeline_view_scroll)
@@ -863,7 +898,7 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
                 bool ev_selected = track_sel &&
                     std::find(ctx.timeline_selected_event_ids.begin(),
                               ctx.timeline_selected_event_ids.end(),
-                              ev.tc_position) != ctx.timeline_selected_event_ids.end();
+                              ev.id) != ctx.timeline_selected_event_ids.end();
 
                 ImU32 ec = ImGui::ColorConvertFloat4ToU32(event_color(ev.type));
 
@@ -890,49 +925,78 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
                 // Detect click proximity (within 10px)
                 if ((lane_clicked_l || lane_clicked_r) && lane_hovered &&
                     std::fabs(mouse_pos.x - ex) < 10.f)
-                    clicked_tc = ev.tc_position;
+                    clicked_id = ev.id;
             }
 
-            // Handle left-click on an event
-            if (lane_clicked_l && clicked_tc >= 0) {
+            // Drag-move: while the lane is held and the mouse is being dragged,
+            // reposition the armed event by dispatching an update keyed on its id
+            // (the engine's update_event matches on id and re-sorts).  (Bug 9a)
+            if (lane_active && s_drag_track == track.id && s_drag_event_id >= 0 &&
+                ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
+                cbs.on_timeline_update_event) {
+                int64_t new_frame = static_cast<int64_t>(
+                    ctx.timeline_view_scroll +
+                    static_cast<double>(mouse_pos.x - lane_orig.x) / static_cast<double>(kZoom2));
+                if (new_frame < 0) new_frame = 0;
+                for (const auto& ev : track.events) {
+                    if (ev.id == s_drag_event_id) {
+                        if (ev.tc_position != new_frame) {
+                            TimelineEvent updated = ev;
+                            updated.tc_position   = new_frame;
+                            cbs.on_timeline_update_event(tl.id, track.id, std::move(updated));
+                        }
+                        break;
+                    }
+                }
+            }
+            // Release ends any in-progress drag on this track.
+            if (s_drag_track == track.id &&
+                ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                s_drag_event_id = -1;
+                s_drag_track    = -1;
+            }
+
+            // Handle left-click on an event (a click is a press+release without a
+            // drag, so it never fires after a reposition).
+            if (lane_clicked_l && clicked_id >= 0) {
                 if (ctx.timeline_selected_track_id != track.id) {
                     ctx.timeline_selected_track_id = track.id;
                     ctx.timeline_selected_event_ids.clear();
                 }
                 if (state.rem_mode && cbs.on_timeline_remove_event) {
-                    cbs.on_timeline_remove_event(tl.id, track.id, clicked_tc);
+                    cbs.on_timeline_remove_event(tl.id, track.id, clicked_id);
                     state.rem_mode = false;
                 } else {
                     bool shift = ImGui::GetIO().KeyShift;
                     auto& sel = ctx.timeline_selected_event_ids;
-                    auto it = std::find(sel.begin(), sel.end(), clicked_tc);
+                    auto it = std::find(sel.begin(), sel.end(), clicked_id);
                     if (shift) {
                         if (it != sel.end()) sel.erase(it);  // toggle off
-                        else                 sel.push_back(clicked_tc);
+                        else                 sel.push_back(clicked_id);
                     } else {
                         sel.clear();
-                        sel.push_back(clicked_tc);
+                        sel.push_back(clicked_id);
                     }
                 }
-            } else if (lane_clicked_l && clicked_tc < 0) {
+            } else if (lane_clicked_l && clicked_id < 0) {
                 // Clicked empty lane area — clear event selection, switch track
                 ctx.timeline_selected_track_id = track.id;
                 ctx.timeline_selected_event_ids.clear();
             }
 
             // Right-click: update persistent popup state and select the event
-            if (lane_clicked_r && clicked_tc >= 0) {
-                s_ctx_clicked_tc    = clicked_tc;
+            if (lane_clicked_r && clicked_id >= 0) {
+                s_ctx_clicked_id    = clicked_id;
                 s_ctx_clicked_track = track.id;
                 ctx.timeline_selected_track_id = track.id;
                 auto& sel = ctx.timeline_selected_event_ids;
-                if (std::find(sel.begin(), sel.end(), clicked_tc) == sel.end()) {
+                if (std::find(sel.begin(), sel.end(), clicked_id) == sel.end()) {
                     sel.clear();
-                    sel.push_back(clicked_tc);
+                    sel.push_back(clicked_id);
                 }
             } else if (lane_clicked_r) {
                 // Right-clicked empty lane — clear the event context
-                s_ctx_clicked_tc = -1;
+                s_ctx_clicked_id = -1;
             }
 
             // Context popup — uses BeginPopupContextItem so it's properly associated
@@ -940,7 +1004,7 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
             // BeginPopupContextItem instead of OpenPopup+BeginPopup avoids the bug
             // where BeginPopupContextWindow would fire simultaneously and close us.
             if (ImGui::BeginPopupContextItem("##ev_lane_ctx")) {
-                if (s_ctx_clicked_tc >= 0 &&
+                if (s_ctx_clicked_id >= 0 &&
                     !ctx.timeline_selected_event_ids.empty() &&
                     ctx.timeline_selected_track_id == s_ctx_clicked_track &&
                     cbs.on_timeline_remove_event) {
@@ -950,10 +1014,10 @@ void panel_timeline_view(UIState& state, LayoutContext& ctx, LayoutCallbacks& cb
                                   n == 1 ? "Delete Event" : "Delete %d Events", n);
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.4f, 0.4f, 1.f));
                     if (ImGui::MenuItem(del_label)) {
-                        for (int64_t tc : ctx.timeline_selected_event_ids)
-                            cbs.on_timeline_remove_event(tl.id, ctx.timeline_selected_track_id, tc);
+                        for (int64_t eid : ctx.timeline_selected_event_ids)
+                            cbs.on_timeline_remove_event(tl.id, ctx.timeline_selected_track_id, eid);
                         ctx.timeline_selected_event_ids.clear();
-                        s_ctx_clicked_tc = -1;
+                        s_ctx_clicked_id = -1;
                     }
                     ImGui::PopStyleColor();
                 } else {

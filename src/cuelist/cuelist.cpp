@@ -185,7 +185,26 @@ void CueList::go()
     }
 
     if (state_ == PlaybackState::Playing || state_ == PlaybackState::Holding) {
-        // Advance to next entry.
+        // Honor the current cue's link mode on manual GO. Previously GO always
+        // advanced sequentially and ignored link == Loop/Jump, so a LOOP cue (or
+        // pressing GO at the end of a looping list) simply stopped — "cuelist LOOP
+        // doesn't work". Loop is only otherwise honored by auto Follow/Wait
+        // triggers (handle_link), never by manual GO. Loop wraps to the top; Jump
+        // goes to the target; Next/Stop fall through to sequential advance (a Stop
+        // link only halts AUTO-follow, not an explicit manual GO).
+        const FullCueEntry& cur = entries_[static_cast<std::size_t>(current_idx_)];
+        if (cur.link == LinkMode::Loop) {
+            activate_entry(0, true, pending_events_);
+            return;
+        }
+        if (cur.link == LinkMode::Jump) {
+            const int tgt = find_by_number(CueNumber{ cur.jump_major, cur.jump_minor });
+            if (tgt >= 0) {
+                activate_entry(tgt, true, pending_events_);
+                return;
+            }
+        }
+        // Advance to next entry (Next / Stop / unresolved Jump).
         const int next = find_next_from(current_idx_);
         if (next < 0) {
             // End of list — stop.

@@ -26,6 +26,18 @@ static constexpr int kScanIntervalMs    = 2000; // hot-plug poll every 2 s
 static constexpr int kKeepaliveMs       = 33;   // re-send frame if idle > 33 ms
 static constexpr int kOutputSleepUs     = 100;  // tight-poll sleep when no frame
 
+// Process-wide count of LIVE DacManager output threads. Each output_thread_fn
+// increments this on entry and decrements on exit (atomic RMW => race-free).
+// Priority is chosen from the post-increment count: with only a few streams,
+// TIME_CRITICAL (Realtime) minimises per-frame output latency; once many streams
+// exist, equal-priority TIME_CRITICAL threads would round-robin and outrank the
+// engine tick, oversubscribing the scheduler's top band (choppy output at low
+// CPU). Above the threshold we fall back to HIGHEST (High), which still preempts
+// normal app threads without saturating the ceiling.
+static std::atomic<int> g_output_thread_count{0};
+// At or below this many concurrent output threads, run them at TIME_CRITICAL.
+static constexpr int    kRealtimeStreamThreshold = 4;
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Construction / destruction
 // ─────────────────────────────────────────────────────────────────────────────
@@ -169,9 +181,16 @@ void DacManager::build_candidates() {
     active_.store(nullptr, std::memory_order_release);
     candidates_.clear();
 
-    // Probe up to 4 physical Helios DACs (cover multi-DAC rigs)
-    for (int i = 0; i < 4; ++i)
+    // Probe up to 4 physical Helios DACs (cover multi-DAC rigs).
+    // Push the device whose index matches this manager's ordinal first so that
+    // when multiple DacManagers start simultaneously each one wins its own
+    // physical Helios slot instead of all racing for Helios(0).
+    if (stream_idx_ >= 0 && stream_idx_ < 4)
+        candidates_.push_back(std::make_unique<HeliosDac>(stream_idx_));
+    for (int i = 0; i < 4; ++i) {
+        if (i == stream_idx_) continue; // already pushed above
         candidates_.push_back(std::make_unique<HeliosDac>(i));
+    }
 
     // Always include the emulated Helios as a last resort
     candidates_.push_back(std::make_unique<HeliosEmulatedDac>());
@@ -370,8 +389,21 @@ void DacManager::probe_etherdream() {
 // ─────────────────────────────────────────────────────────────────────────────
 void DacManager::output_thread_fn() {
     set_thread_name("dac-output");
-    set_thread_priority_current(ThreadPriority::Realtime);
-    log::info("DacManager: output thread started (TIME_CRITICAL)");
+    // Stream-count-aware output priority.  For the common few-stream case run at
+    // TIME_CRITICAL (Realtime) to minimise per-frame output latency.  Once many
+    // streams exist, equal-priority TIME_CRITICAL threads round-robin and outrank
+    // the engine tick, saturating the scheduler's top band (choppy output at low
+    // CPU); above the threshold we fall back to HIGHEST, which still preempts
+    // normal app threads without oversubscribing the ceiling.  The count is the
+    // process-wide number of live output threads (this thread included).
+    const int live_outputs = g_output_thread_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    const ThreadPriority out_prio = (live_outputs <= kRealtimeStreamThreshold)
+                                        ? ThreadPriority::Realtime
+                                        : ThreadPriority::High;
+    set_thread_priority_current(out_prio);
+    log::info("DacManager: output thread started (%s, %d live)",
+              out_prio == ThreadPriority::Realtime ? "TIME_CRITICAL" : "HIGHEST",
+              live_outputs);
 
     using Clock = std::chrono::steady_clock;
 
@@ -492,6 +524,9 @@ void DacManager::output_thread_fn() {
         }
     }
 
+    // Balance the entry increment so the live-thread count stays accurate for
+    // priority decisions made by output threads that start later.
+    g_output_thread_count.fetch_sub(1, std::memory_order_relaxed);
     log::info("DacManager: output thread exiting");
 }
 

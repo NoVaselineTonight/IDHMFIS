@@ -28,7 +28,9 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <thread>
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Fixed CLSID for our DirectShow filter.
@@ -541,14 +543,52 @@ void VirtualCamera::start_mf_virtual_camera() {
     log::info("VirtualCamera: calling MFCreateVirtualCamera(type=0 lifetime=0 access=0 name='%s' clsid=%ls)",
               kFriendlyName, clsid_str.c_str());
 
+    // MFCreateVirtualCamera + Start can BLOCK INDEFINITELY when a prior instance
+    // left a stale virtual-camera registration (after a crash / hard-kill) or the
+    // MF frame-server service is wedged.  This runs during "Starting outputs", so
+    // a hang here FREEZES the whole app at startup.  The MF virtual camera is an
+    // OPTIONAL sidecar (SHM + NDI still deliver the feed), so we time-box it:
+    // run the call on a detached worker thread and give up after a few seconds.
+    struct VCamCreateResult {
+        std::mutex mtx;
+        bool       done = false;
+        HRESULT    hr   = E_FAIL;
+        IUnknown*  vcam = nullptr;
+    };
+    auto res = std::make_shared<VCamCreateResult>();
+
+    std::thread([pfnCreate, wfname, res]() {
+        IUnknown* pv = nullptr;
+        HRESULT   h  = pfnCreate(0, 0, 0, wfname.c_str(), kClsid, nullptr, 0, &pv);
+        if (SUCCEEDED(h) && pv) {
+            auto* pMinW   = reinterpret_cast<IMinVirtualCamera*>(pv);
+            HRESULT sh    = pMinW->Start(nullptr);
+            if (FAILED(sh)) { pv->Release(); pv = nullptr; h = sh; }
+        }
+        std::lock_guard<std::mutex> lk(res->mtx);
+        res->hr = h; res->vcam = pv; res->done = true;
+    }).detach();
+
+    constexpr int kVCamTimeoutMs = 4000;
+    bool      done  = false;
+    HRESULT   hr    = E_FAIL;
     IUnknown* pVCam = nullptr;
-    HRESULT hr = pfnCreate(
-        0,  // MFVirtualCameraType_SoftwareCameraSource
-        0,  // MFVirtualCameraLifetime_Session
-        0,  // MFVirtualCameraAccess_CurrentUser
-        wfname.c_str(), kClsid,
-        nullptr, 0,
-        &pVCam);
+    for (int waited = 0; waited < kVCamTimeoutMs; waited += 20) {
+        {
+            std::lock_guard<std::mutex> lk(res->mtx);
+            if (res->done) { done = true; hr = res->hr; pVCam = res->vcam; break; }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    if (!done) {
+        // The worker is still parked inside mfsensorgroup.dll, so do NOT FreeLibrary
+        // (it is still executing in it) — leak the handle and continue startup.
+        log::warn("VirtualCamera: MFCreateVirtualCamera did not return within %d ms — "
+                  "skipping MF virtual camera (SHM + NDI feed unaffected). Likely a stale "
+                  "virtual-camera registration from a prior crash/hard-kill.", kVCamTimeoutMs);
+        return;
+    }
 
     FreeLibrary(hSG); // COM holds a ref to the DLL; FreeLibrary is safe here
 
@@ -557,15 +597,6 @@ void VirtualCamera::start_mf_virtual_camera() {
                    hr == 0x800401F3 ? " (CO_E_CLASSSTRING: CLSID not in registry or DLL missing)" :
                    hr == 0x80040154 ? " (REGDB_E_CLASSNOTREG: COM server not registered)" :
                    hr == 0x80070005 ? " (E_ACCESSDENIED: needs elevation for HKLM?)" : "");
-        return;
-    }
-
-    // Start the virtual camera so it appears in MFEnumDeviceSources immediately.
-    auto* pMin = reinterpret_cast<IMinVirtualCamera*>(pVCam);
-    hr = pMin->Start(nullptr);
-    if (FAILED(hr)) {
-        log::error("VirtualCamera: IMFVirtualCamera::Start FAILED hr=0x%08X", hr);
-        pVCam->Release();
         return;
     }
 

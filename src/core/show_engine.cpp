@@ -500,12 +500,19 @@ PointBuffer ShowEngine::render_keyframe_layer(const KeyframeLayer& kf, int targe
                     float ddx = obj.pts[i + 1].x - obj.pts[i].x;
                     float ddy = obj.pts[i + 1].y - obj.pts[i].y;
                     float seg_len = std::sqrt(ddx * ddx + ddy * ddy);
+                    // Pen-up convention: a control point coincident with its
+                    // predecessor marks a blank travel. The segment LEAVING that
+                    // duplicate is the unlit jump to the next stroke, so its
+                    // points are blanked — preventing ghost connector lines.
+                    bool seg_blank = (i >= 1)
+                        && obj.pts[i].x == obj.pts[i - 1].x
+                        && obj.pts[i].y == obj.pts[i - 1].y;
                     int steps = std::max(2, static_cast<int>(total_steps * seg_len / total_len));
                     for (int k = 0; k < steps; ++k) {
                         float t = static_cast<float>(k) / static_cast<float>(steps - 1);
                         float px = obj.pts[i].x + t * ddx;
                         float py = obj.pts[i].y + t * ddy;
-                        out.push_back(LaserPoint::from_norm(px, py, r8, g8, b8, false));
+                        out.push_back(LaserPoint::from_norm(px, py, r8, g8, b8, seg_blank));
                     }
                 }
             }
@@ -736,8 +743,9 @@ static void apply_frame_fx(PointBuffer& buf, const FxLayer& layer, float t) {
         if (!e.enabled) continue;
         int  seg  = -1;
         bool prev = true;
+        bool prev_clipped = false;
         for (auto& pt : buf) {
-            if (pt.blanked) { prev = true; continue; }
+            if (pt.blanked) { prev = true; prev_clipped = false; continue; }
             if (prev)       { ++seg; prev = false; }
 
             // Bug 23: direction_phase() returns 0 when centroids.size()<=1 (all single-segment
@@ -758,7 +766,7 @@ static void apply_frame_fx(PointBuffer& buf, const FxLayer& layer, float t) {
                 float gate_val = (e.dir_width > 0.f)
                     ? std::fmod(dir_off / e.dir_width, 1.f)
                     : phase;  // duty-cycle gate for Sync direction
-                if (gate_val >= e.width) { pt.blanked = true; continue; }
+                if (gate_val >= e.width) { pt.blanked = true; prev_clipped = false; continue; }
             }
             float sine_val = std::sin(phase * kTwoPi);
             float cos_val  = std::cos(phase * kTwoPi);
@@ -1050,6 +1058,26 @@ static void apply_frame_fx(PointBuffer& buf, const FxLayer& layer, float t) {
                 float ry = nx * sin_a + ny * cos_a;
                 nx = rx; ny = ry; break;
             }
+            }
+            // Bug 7: a movement/geometry FX that pushes a LIT point outside the
+            // ±1 scan field must BLANK it, not clamp it. Clamping piles every
+            // out-of-field point onto the boundary coordinate, so the laser draws
+            // a lit ghost line/smear along the edge (the "ghost objects and
+            // artifacting" with movement FX). Same class as the v5.01 block_scale
+            // fix — blank before the clamp; the clamp below stays harmless.
+            if (!pt.blanked && (nx < -1.f || nx > 1.f || ny < -1.f || ny > 1.f)) {
+                pt.blanked = true;
+                prev_clipped = true;
+            } else if (prev_clipped) {
+                // Bug (v5.x): the point that EXITS the field is blanked above, but
+                // the FIRST in-range point after an out-of-field run is the RE-ENTRY:
+                // its `blanked` flag governs the beam for the move from the previous
+                // (clamped-to-edge) point back into the field. If left lit, that move
+                // draws a ghost line/smear from the field edge — constant with the
+                // oscillating Scale FX. Blank the re-entry so the return travel is
+                // dark on BOTH sides of the boundary, then clear the carry.
+                pt.blanked = true;
+                prev_clipped = false;
             }
             pt.x = static_cast<int16_t>(std::clamp(nx, -1.f, 1.f) * kScale);
             pt.y = static_cast<int16_t>(std::clamp(ny, -1.f, 1.f) * kScale);
@@ -3053,7 +3081,7 @@ void ShowEngine::build_frame()
                     }
                     KeyframeLayer stream_morphed = build_morphed(stream_cur_kf, stream_prev_kf);
                     if (stream_morphed.objects.empty()) continue;
-                    PointBuffer stream_pts = render_keyframe_layer(stream_morphed, 256);
+                    PointBuffer stream_pts = render_keyframe_layer(stream_morphed, programmer_point_budget());
                     const FxLayer& stream_fx = (fx_it != fce.per_stream_fx.end())
                                                ? fx_it->second : fce.fx_layer;
                     apply_frame_fx(stream_pts, stream_fx, fx_t);
@@ -3077,7 +3105,7 @@ void ShowEngine::build_frame()
                 // Global path during fade: all streams get the same morphed geometry and FX
                 KeyframeLayer morphed = build_morphed(cur_kf, prev_kf);
                 if (!morphed.objects.empty()) {
-                    PointBuffer morph_pts = render_keyframe_layer(morphed, 256);
+                    PointBuffer morph_pts = render_keyframe_layer(morphed, programmer_point_budget());
                     apply_frame_fx(morph_pts, fce.fx_layer, fx_t);
                     apply_global_geometry(morph_pts, fce.global_layer);
                     apply_global_layer(morph_pts, fce.global_layer, fx_t, pb_intensity, rs.gfx_smooth);
@@ -3212,7 +3240,7 @@ void ShowEngine::build_frame()
                     const KeyframeLayer& stream_kf = (kf_it != fce.per_stream_kf.end())
                                                      ? kf_it->second : fce.keyframe_layer;
                     if (stream_kf.objects.empty()) continue;
-                    PointBuffer stream_pts = render_keyframe_layer(stream_kf, 256);
+                    PointBuffer stream_pts = render_keyframe_layer(stream_kf, programmer_point_budget());
                     const FxLayer& stream_fx = (fx_it != fce.per_stream_fx.end())
                                                ? fx_it->second : fce.fx_layer;
                     apply_frame_fx(stream_pts, stream_fx, fx_t);
@@ -3235,7 +3263,7 @@ void ShowEngine::build_frame()
             } else {
                 // Global path: all streams get the same geometry and FX
                 if (fce.keyframe_layer.objects.empty()) continue;
-                PointBuffer pb_pts = render_keyframe_layer(fce.keyframe_layer, 256);
+                PointBuffer pb_pts = render_keyframe_layer(fce.keyframe_layer, programmer_point_budget());
                 apply_frame_fx(pb_pts, fce.fx_layer, fx_t);
                 apply_global_geometry(pb_pts, fce.global_layer);
                 apply_global_layer(pb_pts, fce.global_layer, fx_t, pb_intensity, rs.gfx_smooth);
@@ -3302,7 +3330,7 @@ void ShowEngine::build_frame()
     PointBuffer programmer_pts_live;
     if (programmer_will_run) {
         programmer_pts_live = render_keyframe_layer(programmer_objects_,
-                                                    point_rate_ / 4);
+                                                    programmer_point_budget());
         apply_frame_fx(programmer_pts_live, programmer_fx_layer_, static_cast<float>(fx_time_));
         apply_global_geometry(programmer_pts_live, programmer_global_layer_);
         apply_global_layer(programmer_pts_live, programmer_global_layer_,
@@ -3408,9 +3436,16 @@ void ShowEngine::build_frame()
             for (auto& pt : programmer_pts_live) pt.blanked = true;
     }
 
-    // Pre-compute per-stream latched programmer frames (cue base + latched programmer).
+    // Pre-compute per-stream latched programmer frames (programmer-only, frozen).
     // These are used in the fanout for streams that were deselected while the programmer
     // had content — their last programmer state is frozen on them until CLR.
+    // The latched frame MUST reproduce exactly what the head showed while the stream was
+    // still in active_stream_ids_, i.e. the programmer_pts_live frame built above: the
+    // programmer content ONLY (no cue/playback base — programmer trumps), and NOT run
+    // through point_optimizer_ (the live path optimizes only the separate `points`
+    // buffer, never programmer_pts_live).  Prepending points_base or optimizing here was
+    // the deselect "morph": it changed geometry, drawing order and point budget the
+    // instant the stream lost selection.
     std::unordered_map<int, PointBuffer> latched_frames;
     if (has_any_latch) {
         for (const auto& [sid, sp] : stream_prog_) {
@@ -3418,21 +3453,13 @@ void ShowEngine::build_frame()
             bool is_active = std::find(active_stream_ids_.begin(),
                                        active_stream_ids_.end(), sid) != active_stream_ids_.end();
             if (is_active) continue; // active stream gets live programmer instead
-            PointBuffer lf = points_base;
-            PointBuffer prog_pts = render_keyframe_layer(sp.objects, point_rate_ / 4);
-            apply_frame_fx(prog_pts, sp.fx_layer, static_cast<float>(fx_time_));
-            apply_global_geometry(prog_pts, sp.global_layer);
-            apply_global_layer(prog_pts, sp.global_layer, static_cast<float>(fx_time_));
-            for (auto& pt : prog_pts)
-                lf.push_back(pt);
-            // Run the same point optimizer on the latched composite that the live path
-            // applies to (cue + playbacks + programmer) on line 2845.  Without this the
-            // latched frame has a different drawing order and blanked-travel layout than
-            // the live frame the operator was looking at, causing a visible "morph" on
-            // deselect.
-            lf = point_optimizer_.optimize(lf);
-            apply_safety_blackout(lf);
+            PointBuffer lf = render_keyframe_layer(sp.objects, programmer_point_budget());
+            apply_frame_fx(lf, sp.fx_layer, static_cast<float>(fx_time_));
+            apply_global_geometry(lf, sp.global_layer);
+            apply_global_layer(lf, sp.global_layer, static_cast<float>(fx_time_));
+            // Same blanking/safety gates the active path applies to programmer_pts_live.
             if (!output_enabled_) for (auto& pt : lf) pt.blanked = true;
+            apply_safety_blackout(lf);
             if (emergency_shutoff_active_) for (auto& pt : lf) pt.blanked = true;
             latched_frames[sid] = std::move(lf);
         }
@@ -3479,6 +3506,16 @@ void ShowEngine::build_frame()
         bool has_legacy_bus_laser = false;
         for (const auto& d : stream_defs_)
             if (d.type == OutputStreamType::Laser) { has_legacy_bus_laser = true; break; }
+
+        // De-synchronize NDI sends across the 1000 Hz ticks. Without this every
+        // NDI stream sharing the same fps shares the same ndi_period and fires on
+        // the SAME ticks (frame_count_ % period == 0), so on those ticks ALL NDI
+        // senders rasterize (1080p+) and call the clock_video send back-to-back on
+        // the engine thread — a periodic multi-ms stall that scales with stream
+        // count and starves the laser buses while average CPU stays low. Giving
+        // each NDI stream a distinct phase offset spreads at most ceil(N/period)
+        // sends onto any single tick instead of all N, keeping the 1 kHz cadence.
+        int ndi_phase_seq = 0;
 
         for (size_t si = 0; si < stream_defs_.size(); ++si) {
             const OutputStreamDef& def = stream_defs_[si];
@@ -3634,7 +3671,13 @@ void ShowEngine::build_frame()
                 double ndi_fps_d = static_cast<double>(std::max(1, cfg.ndi_fps_N))
                                  / static_cast<double>(std::max(1, cfg.ndi_fps_D));
                 int ndi_period = std::max(1, static_cast<int>(1000.0 / ndi_fps_d + 0.5));
-                if (frame_count_ % static_cast<uint64_t>(ndi_period) == 0) {
+                // Distinct phase per NDI stream (stable across ticks since the
+                // guards above are config-invariant) so same-fps streams no longer
+                // all fire on the same tick. Rate is unchanged — each stream still
+                // sends once every ndi_period ticks, just at a staggered offset.
+                int ndi_phase = (ndi_phase_seq++) % ndi_period;
+                if (frame_count_ % static_cast<uint64_t>(ndi_period) ==
+                    static_cast<uint64_t>(ndi_phase)) {
                     PointBuffer out = src;
                     // Append playbacks assigned exclusively to this stream
                     {

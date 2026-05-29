@@ -369,13 +369,21 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
             ImGui::SetItemTooltip("REM: click to UNPATCH and delete this output");
         } else if (ImGui::IsItemClicked()) {
             state.active_group_id = -1;
-            if (active)
-                state.active_stream_ids.erase(
-                    std::remove(state.active_stream_ids.begin(),
-                                state.active_stream_ids.end(), po_ptr->id),
-                    state.active_stream_ids.end());
-            else
+            if (ImGui::GetIO().KeyShift) {
+                // SHIFT+click: accumulate a multi-head selection (toggle this head
+                // in/out of the union without disturbing the others).
+                if (active)
+                    state.active_stream_ids.erase(
+                        std::remove(state.active_stream_ids.begin(),
+                                    state.active_stream_ids.end(), po_ptr->id),
+                        state.active_stream_ids.end());
+                else
+                    state.active_stream_ids.push_back(po_ptr->id);
+            } else {
+                // Plain click: select ONLY this head (replace the selection).
+                state.active_stream_ids.clear();
                 state.active_stream_ids.push_back(po_ptr->id);
+            }
             streams_changed = true;
         }
         if (!state.rem_mode) {
@@ -591,7 +599,20 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                     }
                 } else if (grp) {
                     std::vector<int> old_ids_grp = state.active_stream_ids;
-                    if (grp_selected) {
+                    if (ImGui::GetIO().KeyShift) {
+                        // SHIFT+click: UNION this group's members into the current
+                        // selection (do NOT replace). Skip ids already present so no
+                        // duplicates enter active_stream_ids; preserve existing order.
+                        for (int mid : grp->member_ids) {
+                            if (std::find(state.active_stream_ids.begin(),
+                                          state.active_stream_ids.end(), mid)
+                                == state.active_stream_ids.end())
+                                state.active_stream_ids.push_back(mid);
+                        }
+                        // A single int cannot name a multi-group set; clear it.
+                        state.active_group_id = -1;
+                        feeds_switch_s(old_ids_grp, state.active_stream_ids, ctx);
+                    } else if (grp_selected) {
                         // Capture combo key before switching away so that
                         // re-selecting this group later restores its programmer content.
                         feeds_capture_s(old_ids_grp, ctx);
@@ -697,21 +718,8 @@ void panel_streams(UIState& state, LayoutContext& ctx, LayoutCallbacks& cbs) {
                             static_cast<int>(state.active_stream_ids.size()));
     }
 
-    // ── REINIT STREAMS ────────────────────────────────────────────────────────
-    ImGui::Spacing();
-    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.22f, 0.13f, 0.02f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.58f, 0.34f, 0.06f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.16f, 0.09f, 0.02f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f,  0.72f, 0.15f, 1.0f));
-    if (ImGui::Button("REINIT##sreinit")) {
-        if (cbs.on_reinit_streams) cbs.on_reinit_streams();
-    }
-    ImGui::PopStyleColor(4);
-    ImGui::SetItemTooltip(
-        "Re-initialize all output streams.\n"
-        "Stops every DAC manager and restarts them from scratch.\n"
-        "Use when streams are not sending after loading a show,\n"
-        "or when Capture 2024 / DAC hardware loses its connection.");
+    // REINIT moved to the OUTPUTS panel (panel_patch.cpp); it no longer lives in
+    // the STREAMS/GROUPS window.
 
     // ── AUTO GROUPS ───────────────────────────────────────────────────────────
     // Compact button → popup: generates symmetrical groups from the output layout.
