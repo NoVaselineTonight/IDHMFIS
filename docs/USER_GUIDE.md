@@ -1,26 +1,6 @@
 # IDHMFIS User Guide
 
-**Version 3.52** — Professional laser show programming software. Primary output: ILDA over hardware DAC.
-
----
-
-## What's New in v2.6.1
-
-| Feature | Description |
-|---------|-------------|
-| Safety EULA gate | First-launch safety acknowledgment, persisted to `%APPDATA%\IDHMFIS\eula_accepted` — shown once per machine |
-| Safety Blackout Zones | Border crops (per-edge with tilt angle) and rectangular block zones, enforced in the engine at the point buffer level before DAC output |
-| Safety zone overlay | Blackout zone boundaries rendered as overlays in the 2D Frame Editor preview |
-| FX CrossFade | `crossfade` parameter on both GlobalFxEntry and FrameFxEntry (0 = snap, 1 = smooth low-pass) — prevents stepping artifacts when editing FX live |
-| FX custom color pickers | Color A / Color B pickers for all color FX types (Col2, Col3, ColFlick, ColorCycle, ColorPulse, RainbowTrail) via `use_custom_colors` toggle |
-| FX speed display | FX rate shown as MM:SS duration equivalent with BPM equivalent in tooltip |
-| FX Width gate fix | Width gate (duty-cycle) now correctly gates the count of objects ON rather than a time window; Sync direction behavior corrected |
-| Point optimizer: double-anchor fix | `step_anchor` now runs twice — once before and once after `step_path_ordering` — resolving wavy-line artifacts at reordered segment starts |
-| StackFanOut FX block | New FX block: distributes phase offset across objects in a stack-fan pattern |
-| Saw FX block | New GlobalFxType: sawtooth wave shape for position/intensity FX |
-| Group Scale tool | Bounding-box resize of all selected objects in the Frame Editor simultaneously |
-| Premade Shapes tool | Mathematical function curve placement (Lissajous, spirograph, polygon, etc.) directly in the Frame Editor |
-| EULA persistence | Acceptance state written to `%APPDATA%` and never re-prompted on the same machine |
+This guide covers operating IDHMFIS 5.x, from first launch to cue stacks, FX, timeline and safety zones. For how the software works internally, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -174,7 +154,7 @@ The ruler shows beat lines based on the current BPM. BPM is either auto-detected
 
 ---
 
-## Safety Blackout Zones (v2.6.1)
+## Safety Blackout Zones
 
 Safety Blackout Zones prevent the laser from illuminating restricted areas.
 All zones are **engine-enforced**: the point buffer is clipped before it reaches
@@ -215,7 +195,7 @@ output preview when zones are disabled.
 
 ---
 
-## FX System (v2.6.1)
+## FX System
 
 IDHMFIS has two FX layers, both accessible from the Inspector or the cue editor.
 
@@ -236,12 +216,12 @@ Applied to the global intensity output of the cue. Each entry has:
 | Parts | Number of wave cycles across the group |
 | Segs | Objects per segment (N adjacent share the same phase) |
 | Width | Fraction of objects ON at any moment (duty-cycle gate) |
-| CrossFade | 0 = snap to new value, 1 = smooth low-pass transition (new in v2.6.1) |
+| CrossFade | 0 = snap to new value, 1 = smooth low-pass transition |
 
-**Saw** (new in v2.6.1): sawtooth waveform that rises linearly from 0 to 1 over
+**Saw**: sawtooth waveform that rises linearly from 0 to 1 over
 one period, then snaps back. Use for one-directional sweep effects.
 
-**StackFanOut** (new in v2.6.1): distributes phase across objects in a stacked
+**StackFanOut**: distributes phase across objects in a stacked
 fan pattern. Combine with Forward direction for a traveling-wave look across a
 beam stack.
 
@@ -265,11 +245,11 @@ Applied per-frame to the point buffer geometry and colors.
 | ColFlick | Color flicker: random per-channel variation (fire/glitch effect) |
 | Strobe | Rhythmic blanking: points blanked when phase > depth |
 
-**Custom Color Pickers (new in v2.6.1)**: all color FX types (Col2, Col3,
+**Custom Color Pickers**: all color FX types (Col2, Col3,
 ColFlick, ColorCycle, ColorPulse, RainbowTrail) have Color A and Color B pickers.
 Enable **Use Custom Colors** to override the generator's colors with your own.
 
-### FX Speed Display (new in v2.6.1)
+### FX Speed Display
 
 FX rate controls show:
 - Primary display: Hz (free-running) or note division (BPM sync mode)
@@ -296,10 +276,10 @@ laser objects directly.
 | Circle | C | Draw circle |
 | Dot | D | Place point |
 | Text | T | Place text label |
-| Group Scale | G | Resize bounding box of all selected objects (new in v2.6.1) |
-| Premade Shapes | P | Place mathematical curve from a library (new in v2.6.1) |
+| Group Scale | G | Resize bounding box of all selected objects |
+| Premade Shapes | P | Place mathematical curve from a library |
 
-### Group Scale (new in v2.6.1)
+### Group Scale
 
 1. Select two or more objects with the Select tool (click + Ctrl+click, or
    drag a selection box).
@@ -310,7 +290,7 @@ laser objects directly.
 5. Hold Shift to constrain to the original aspect ratio.
 6. Press Escape or click outside to confirm.
 
-### Premade Shapes (new in v2.6.1)
+### Premade Shapes
 
 1. Press **P** or choose Premade Shapes from the toolbar.
 2. A shape picker panel opens with categories:
@@ -408,10 +388,9 @@ sending it to the DAC or NDI rasterizer. The optimizer is configured in
 | 7 | Density norm | Redistribute points along path to match target PPS budget; interpolate sparse segments and skip surplus dense ones |
 | 7b | Overscan clip | Remove points outside the output field + margin |
 
-**v2.6.1 fix**: the double-anchor (steps 2 and 6) resolves wavy-line artifacts
-that occurred when path-reorder placed a new segment start immediately after a
-travel move. The second anchor pass gives galvo settle time in the reordered
-output.
+**Why anchor runs twice:** path ordering can put a segment start directly after a
+long travel move. Running anchor a second time, after reordering, gives the galvos
+time to settle at every new segment start. Without it, lines come out wavy.
 
 ### Optimizer Configuration
 
@@ -759,9 +738,8 @@ See the Point Optimizer section above for all parameters.
 → Check that the render thread is keeping up: View → Performance Monitor
 
 **Wavy lines at segment starts**
-→ This was a known issue resolved in v2.6.1 (double-anchor fix). Ensure you
-   are running v2.6.1 or later. If the issue persists, increase Blank Dwell in
-   Settings → DAC → Optimizer.
+→ Increase Blank Dwell in Settings → DAC → Optimizer. Slower galvos need more
+   settle points after a travel move.
 
 **Safety zone overlay not visible in Frame Editor**
 → Check that Safety Blackout Zones is enabled (Safety/BAM panel → Master Enable)

@@ -1,150 +1,94 @@
 # Changelog
 
-All notable changes to IDHMFIS are documented here.
-Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
-Versioning follows [Semantic Versioning](https://semver.org/).
+Notable changes to IDHMFIS. The version number is bumped by 0.01 on every internal build, so released versions are not consecutive.
 
 ---
 
-## [Unreleased]
+## 5.27 — 2026-05-29
 
-## [0.1.0] — 2026-05-13
+**Rendering and FX**
+- Recording and playback now use the same point budget, so a recorded cue renders exactly as it was programmed.
+- Movement FX that push geometry outside the scan field now blank both the exit and the re-entry segment. This removes ghost lines from Scale and similar effects.
+- Pen-up travel in the keyframe editor is blanked.
+- Deselecting a group now renders the same as programmer-only output.
 
-### Added
-
-**Core Architecture**
-- Lock-free SPSC/MPSC queue infrastructure (readerwriterqueue, concurrentqueue)
-- 1000 Hz show engine tick loop with watchdog thread and stall recovery
-- Double-buffered engine → UI state snapshot (zero-lock reads from UI thread)
-- Command queue for thread-safe UI → engine communication
-
-**Render Pipeline**
-- D3D12 GPU-accelerated vector rasterizer (Windows primary)
-- Vulkan GPU rasterizer (macOS / cross-platform secondary)
-- Gaussian beam profile simulation (configurable sigma, additive blending)
-- HDR (RGBA16F) intermediate render target for physically correct beam overlap
-- Bloom post-processing (separable Gaussian blur)
-- Atmospheric haze density simulation
-- Exposure tone-mapping with film grain option
-- HLSL compute shader: `beam_raster.hlsl`, `post_process.hlsl`
-- GLSL shaders: `beam_vert.glsl`, `beam_frag.glsl`, `post_vert.glsl`, `post_frag.glsl`
-
-**NDI Output**
-- NDI 6 SDK integration (dynamic load — app runs without NDI installed)
-- NDI 5 fallback
-- Source name: "IDHMFIS" (configurable)
-- UYVY 4:2:2 default; BGRA with alpha channel available
-- 1080p/4K, 30/50/60/120 fps configurable
-- Audio passthrough from project timeline
-- Zero NDI frame drops target: < 1/hour at 1080p60
-
-**DAC Output**
-- Helios DAC driver (USB, dynamically loaded libusb-1.0)
-- EtherDream driver (Ethernet TCP/UDP, full protocol with flow control)
-- IDN-Stream sender (Ethernet, ILDA 2023 protocol)
-- LaserDock driver (USB HID, dynamically loaded)
-- Hot-plug detection with automatic DAC promotion
-- Real-time priority output thread (THREAD_PRIORITY_TIME_CRITICAL on Windows)
-- P99 latency measurement (rolling 128-sample stats)
-- Soft keep-alive (repeat last frame on DAC idle to prevent safety timeout)
-- Emulated Helios DAC for testing without hardware
-
-**ArtNet / DMX**
-- Art-Net 4 listener (UDP 6454)
-- Full ArtPoll/ArtPollReply (shows in grandMA3, Hog 4, Avolites, Chamsys, EOS)
-- 15-bit universe addressing (Net × 256 + SubUni)
-- ArtTimeCode parsing
-- sACN E1.31 listener (multicast, full PDU stack)
-- Default 40-channel fixture profile (cue select, intensity, RGBW, pan/tilt, zoom, strobe, etc.)
-- Fixture profile editor with JSON export/import and GDTF import
-
-**MIDI**
-- RtMidi integration
-- NoteOn → activate cue, NoteOff → deactivate cue
-- CC7/CC11 → master intensity, CC64 → blackout toggle
-- Pitch bend → intensity modulation
-
-**OSC**
-- UDP OSC server (port 8000 default)
-- Full OSC 1.0/1.1 packet parser (types: i, f, s, b, T, F, N, I, h, d, t)
-- Bundle support with recursive parsing
-- Control paths: /idhmfis/play, /stop, /pause, /intensity, /bpm, /cue/activate, etc.
-
-**Audio Analysis**
-- WASAPI loopback capture (Windows primary)
-- KissFFT 2048-point FFT with Hann windowing
-- Beat detection and BPM tracking (autocorrelation-based)
-- Sub/mid/high band envelopes with configurable decay
-- Audio-reactive oscilloscope, FFT bar generator inputs
-
-**Content Generators (15 built-in)**
-- Beams (1–32, parallel or radial)
-- Waves (animated sine wave)
-- Lissajous (parametric, animating)
-- Tunnel (concentric zoom rings)
-- Text Scroller (Hershey simplex vector font)
-- Oscilloscope (audio-reactive waveform/spectrum)
-- FFT Bars (frequency analyzer)
-- Spirograph (epitrochoid/hypotrochoid)
-- Particle Field (deterministic time-based)
-- Geometric Morph (n-gon ↔ m-gon interpolation)
-- Ribbon (animated Bezier ribbon)
-- Grid (parametric horizontal/vertical lines)
-- Starburst (N-ray with per-ray oscillation)
-- Fan Sweep (oscillating fan beams)
-- Cone Sweep (3D cone projection)
-
-**Content Import**
-- ILDA file import (.ild): formats 0, 1, 4, 5 (indexed and true-color, 2D and 3D)
-- SVG import → laser vector: M, L, H, V, C, Q, A, Z path commands; bezier flattening; nearest-neighbour path ordering; anchor repeats; blanking insertion
-
-**Project Model**
-- Schema-versioned JSON project format (.idhmfis extension)
-- Human-diffable, git-friendly (pretty-printed, deterministic)
-- 200-step undo/redo with command pattern (persisted per-project)
-- Autosave every 60 seconds to %APPDATA%\IDHMFIS\autosave\
-- Crash recovery on startup (detects stale autosave)
-- Atomic file save (write-to-temp → rename; no corrupt projects on crash)
-- Recent files list (up to 20 entries)
-
-**Per-cue Automation**
-- Keyframe tracks for every GeneratorParams field
-- Linear, Step, and Cubic Bezier interpolation
-- DMX channel mapping per parameter (16-bit aware)
-- MIDI CC mapping per parameter (with learn mode)
-- OSC path mapping per parameter
-- Audio analysis mapping: rms, bpm, sub, mid, high, fft:<bin>
+**Multi-output performance**
+- DAC output-thread priority adapts to stream count (`TIME_CRITICAL` for up to four streams, `HIGH` above that). This removes choppiness on rigs with 15 or more streams.
+- NDI sends are staggered across streams.
+- A shared keyframe render budget (point rate ÷ 30) cuts playback latency.
 
 **UI**
-- Dear ImGui docking branch with SDL3 + D3D12 backend (Windows)
-- SDL3 + Vulkan backend (macOS)
-- 120 fps target idle; 60 fps minimum under load
-- "Obsidian Laser" dark theme (design tokens, documented color palette)
-- Light theme and high-contrast theme
-- Dockable panel layout: Transport / Cue Library / Laser Preview / Inspector / Timeline+DMX Monitor
-- Command palette (Ctrl+K) with fuzzy search across actions, cues, parameters, recent files
-- Custom widgets: FaderStack, XYPad, ColorWheel, TimelineRuler, KeyframeTrack, NDIStatusDot, BeamThicknessSlider, LatencyMeter
-- Full keyboard shortcut system (25+ shortcuts, all rebindable)
+- Timeline: pan by dragging the ruler. Events can be moved, dragged, deleted from a right-click menu, or removed with REM. Events are tracked by ID.
+- SHIFT multi-select for heads and groups.
+- REINIT now rebuilds routing from a snapshot taken before teardown, and has moved to the OUTPUTS panel.
 
-**Infrastructure**
-- CMake 3.25+ build system with FetchContent for all third-party deps
-- vcpkg for Vulkan SDK
-- Compiler warnings as errors (MSVC /W4 /WX, Clang -Wall -Wextra -Werror)
-- .clang-tidy with modernize/readability/performance/bugprone checks
-- GitHub Actions CI (Windows, macOS, clang-tidy jobs)
-- WiX 4 MSI installer script
-- Performance benchmark harness (PERF_REPORT.md)
-- 4-hour accelerated soak test (SOAK_REPORT.md)
+**Engine**
+- Fixed a startup hang: virtual camera creation is limited to 4 s, and the camera sidecar is optional.
+- Autosave now marks the project dirty on edits, so it saves reliably.
+- Manual GO on a cue list now honours the Loop and Jump link modes.
 
----
+## 5.21 — 2026-05-28
 
-## [Future Roadmap]
+- REINIT is now also available in the STREAMS window, where stream connections are managed.
 
-- macOS-native D3D12 alternative (currently Vulkan via MoltenVK)
-- WebGPU backend for browser preview
-- GDTF fixture library
-- Multi-projector output (multiple DACs simultaneously)
-- Timeline sync to SMPTE/LTC
-- Capture from physical camera for overlay/comparison
-- Plugin API for custom generators
-- OSC discovery (Bonjour)
+## 5.01 — 2026-05-28
+
+- Scale FX blanks lit points that leave the `[-1, 1]` field before clamping, which fixes edge-density artefacts.
+- INCL latches content per head instead of taking the whole active-stream set at once.
+- UPDT keeps the data of streams that aren't active when updating a single head.
+- REINIT splits into stop-and-release followed by deferred recreation once the hardware is released.
+- Switching to a stream with no saved content clears the programmer, which stops FX bleeding between streams.
+
+## 4.31 — 2026-05-27
+
+**Stability**
+- Full audit of seven subsystems:
+  - Engine: per-stream X-flip fan-out.
+  - DAC: Ether Dream ping-retry and correct Helios buffer accounting.
+  - Input: MIDI learn lifetime fix, MTC freshness checks, pitch-bend clamping.
+  - FX: floating-point accumulator wrap in eight blocks.
+- Safety: the BAM check is now position-only. Blank points are no longer skipped, because skipping them could mask a violation.
+- Safety: scan-fail samples the centroid of all lit points and latches until an operator resets it.
+- Fixed a data race between autosave and frame building that could crash on save. Autosave now works from a locked snapshot of engine-owned state.
+- Hardening against out-of-range and missing values: DMX bounds, FFT time-of-check races, generator divide-by-zero, NaN in zones and cue lists, NDI dimension caps, timeline seek clamping, OSC bundle validation and the sACN universe range.
+- The engine loop catches exceptions and recovers instead of terminating. Start/stop is serialised with a lifecycle mutex.
+- Orphaned-autosave detection compares process creation time, so a reused PID isn't mistaken for a live session.
+
+**Features**
+- Live DMX monitor in the playback configuration popup.
+- REINIT button for output streams.
+- Show-file load no longer drops into legacy single-bus mode. Stream routing is re-applied once DACs finish stopping.
+
+## 3.75 — 2026-05-22
+
+- Cue reordering with the new `MoveCue` command and a MOVE mode in the cue sheet.
+- Mirrored-stream X-flip is applied in every playback path.
+- `DacManager` is recreated when a laser's ordinal changes.
+- Timeline: external timecode no longer mass-fires events on first sync.
+
+## 3.74 — 2026-05-22
+
+- Groups grid with independent row and column settings.
+- Auto Groups with four generation modes, including Odd/Even and Zigzag.
+- Fine-grained undo in the frame editor, layered ahead of programmer undo.
+- Premade shapes apply symmetry after generation.
+- Output health checker with no false alarms after a show loads.
+
+## 3.70 — 2026-05-22
+
+- Auto groups, mirrored stream IDs stored in playback cues, a clean new-show reset, and a cue-stack BPM "set all" action.
+
+## 1.5 — 2026-05-21
+
+The first tracked release. Main pieces:
+
+- **Engine:** 1 kHz show engine with MPSC command queue, double-buffered snapshot and a watchdog.
+- **Outputs:** Helios, Ether Dream, LaserDock, IDN-Stream and CITP/CAEX drivers with hot-plug detection. NDI 6 output and a Windows 11 virtual camera.
+- **Point optimizer:** seven stages, from path flattening to overscan clipping.
+- **Programmer:** multi-head programmer with INCL/UPDT and LTP tracking. Five-state cue list with follow, wait, timecode, MIDI, OSC, DMX and audio triggers. Up to 40 playbacks.
+- **FX:** 33 FX blocks, a modulation matrix and a bytecode expression engine.
+- **Content:** 30 generators, plus ILDA and SVG import.
+- **Show control:** Art-Net 4 (ArtPoll), sACN, MIDI with learn mode, OSC 1.1, and LTC, MTC and Art-Net timecode.
+- **Safety:** beam-attenuation map, block zones, border crops, scan-fail monitor and emergency shutoff.
+- **Timeline:** multi-track timeline with audio.
+- **Projects:** JSON project format with a SHA-256 integrity trailer, atomic saves, autosave and crash recovery.

@@ -1,225 +1,139 @@
-# Building IDHMFIS from Source
+# Building IDHMFIS
 
-## Quick Start (Windows)
-
-```bat
-# 1. Install toolchain (run once as Administrator in PowerShell)
-Set-ExecutionPolicy -Scope Process Bypass
-.\SETUP_BUILD_ENV.ps1
-
-# 2. Build (any command prompt)
-.\build.bat
-```
-
-The build script installs VS 2022 Build Tools, CMake, and Ninja via winget,
-then configures and compiles everything. All C++ dependencies are fetched
-automatically via CMake FetchContent — no vcpkg or manual installs required.
+IDHMFIS is a single native executable built with CMake and Ninja. Apart from the Vulkan headers (from vcpkg) and the optional NDI SDK, every dependency is fetched and built by CMake.
 
 ---
 
-## Prerequisites
+## Prerequisites (Windows 10/11 x64)
 
-### Windows (Primary Target)
+| Tool | Version | Notes |
+|---|---|---|
+| Visual Studio 2022 or Build Tools | 17.8+ | "Desktop development with C++" workload, Windows 11 SDK |
+| CMake | 3.25+ | |
+| Ninja | 1.11+ | |
+| Git | any | Used by CMake FetchContent |
+| vcpkg | current | Supplies the Vulkan headers and VMA (see `vcpkg.json`) |
+| NDI 6 SDK | 6.x (5.x also works) | Optional. Only needed for NDI output. |
+| WiX Toolset | 4.x | Optional. Only needed for the MSI installer. |
 
-| Tool | Version | Purpose |
-|------|---------|---------|
-| Visual Studio 2022 Build Tools | 17.8+ | MSVC C++20 compiler + Windows SDK |
-| CMake | 3.25+ | Build system |
-| Ninja | 1.11+ | Fast build backend |
-| Git | any | Required by CMake FetchContent |
-| NDI SDK | 6.x (or 5.x) | NDI preview/broadcast streaming (optional — app runs without it) |
-| WiX Toolset | 4.x | MSI installer (optional) |
-
-All other dependencies (SDL3, ImGui, nlohmann/json, RtMidi, KissFFT, VMA, etc.)
-are downloaded and built automatically by CMake FetchContent — no vcpkg needed.
-
-NDI SDK from https://ndi.video/for-developers/ndi-sdk/ (free, registration required).
-Install to the default path (`C:\Program Files\NDI\NDI 6 SDK\`). If not installed,
-IDHMFIS builds and runs without NDI output. Enable with `-DENABLE_NDI=ON`.
-
-### macOS (Secondary Target)
-
-| Tool | Version | Purpose |
-|------|---------|---------|
-| Xcode | 15+ | Apple Clang C++20 |
-| CMake | 3.25+ | Build system |
-| Homebrew | current | Package manager |
-| MoltenVK | latest | Vulkan on Metal |
-
-```bash
-brew install cmake ninja molten-vk vulkan-headers
-```
-
-NDI SDK for Apple from https://ndi.video/for-developers/ndi-sdk/ — install the macOS package.
-
----
-
-## Building on Windows
-
-### Development Build (Debug)
+To set up a fresh machine, [`docs/SETUP_BUILD_ENV.ps1`](SETUP_BUILD_ENV.ps1) installs the Build Tools, CMake and Ninja through winget. Run it once from an elevated PowerShell:
 
 ```powershell
-# Clone the repo
-git clone <repo-url> IDHMFIS
+Set-ExecutionPolicy -Scope Process Bypass
+.\docs\SETUP_BUILD_ENV.ps1
+```
+
+---
+
+## Build
+
+Run these from a **Developer PowerShell for VS 2022** (or any shell where `vcvars64.bat` has been run):
+
+```powershell
+git clone https://github.com/NoVaselineTonight/IDHMFIS.git
 cd IDHMFIS
 
-# Configure
-cmake -B build-debug -G Ninja `
-  -DCMAKE_BUILD_TYPE=Debug
-
-# Build
-cmake --build build-debug --parallel
-
-# Run
-.\build-debug\IDHMFIS.exe
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+      -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
+cmake --build build --parallel
 ```
 
-### Release Build
+The binary is written to `build\bin\IDHMFIS.exe`. `launch.bat` in the repo root starts it.
+
+For a debug build, use `-DCMAKE_BUILD_TYPE=Debug` and a separate build directory such as `build-debug`.
+
+> If you see `C1083: Cannot open include file: 'memory'`, the MSVC environment is not initialised in your shell. Your code is fine. Open a Developer PowerShell and configure again.
+>
+> If you see `LNK1104: cannot open file 'IDHMFIS.exe'`, a previous instance is still running. Close it and rebuild.
+
+---
+
+## Build options
+
+| CMake option | Default | Description |
+|---|---|---|
+| `CMAKE_BUILD_TYPE` | — | `Debug`, `Release` or `RelWithDebInfo` |
+| `ENABLE_NDI` | `OFF` | Build with NDI output. Needs the NDI SDK. |
+| `ENABLE_CLANG_TIDY` | `OFF` | Run clang-tidy during compilation |
+| `IDHMFIS_BUILD_TESTS` | `ON` | Build the benchmark harness and unit tests |
+| `IDHMFIS_BUILD_TOOLS` | `ON` | Build development tools such as `artnet_test_sender` |
+
+The code builds with `/W4 /WX /permissive-`, so every warning is an error, in local builds and in CI alike.
+
+---
+
+## NDI (optional)
+
+1. Download the NDI 6 SDK from <https://ndi.video/for-developers/ndi-sdk/> and install it to the default location, or set `NDI_SDK_DIR` to point at it.
+2. Configure with `-DENABLE_NDI=ON`.
+
+The NDI runtime is loaded dynamically when the app starts. A build with NDI enabled still runs on machines without the NDI runtime installed: NDI output is simply disabled and the status indicator shows *NDI Unavailable*. DAC output, Art-Net, MIDI, OSC and everything else work either way.
+
+---
+
+## Third-party dependencies
+
+Fetched automatically by CMake FetchContent:
+
+| Library | License | Purpose |
+|---|---|---|
+| SDL3 | zlib | Window, input, HiDPI |
+| Dear ImGui (docking) | MIT | UI |
+| nlohmann/json 3.11.3 | MIT | Project serialization |
+| RtMidi | MIT-style | MIDI I/O |
+| readerwriterqueue | BSD | Lock-free SPSC queue |
+| concurrentqueue | BSD | Lock-free MPSC queue |
+| KissFFT | BSD | Audio FFT |
+| Vulkan Memory Allocator | MIT | GPU memory management |
+| hidapi 0.14.0 | BSD | LaserDock USB HID |
+
+Vendored in `src/`: miniaudio (audio playback) and stb_image (image import).
+
+---
+
+## Tests and benchmarks
 
 ```powershell
-cmake -B build-release -G Ninja `
-  -DCMAKE_BUILD_TYPE=Release
+# Project model unit tests
+ctest --test-dir build --output-on-failure
 
-cmake --build build-release --parallel
+# Benchmark harness
+.\build\tests\bench\bench_harness.exe --output bench_results.md
 ```
 
-The release binary is at `build-release\IDHMFIS.exe`.
+See [PERFORMANCE.md](PERFORMANCE.md) for the targets and what each benchmark measures.
 
-### MSI Installer
+---
+
+## MSI installer
 
 ```powershell
 .\installer\build_installer.ps1
 ```
 
-Output: `dist\IDHMFIS-Setup-x64.msi`
-
-Requires WiX 4 (`dotnet tool install wix` if not installed — the script handles this).
+This builds a Release binary and packages it as `dist\IDHMFIS-Setup-x64.msi`. It needs WiX 4 (`dotnet tool install --global wix`).
 
 ---
 
-## Building on macOS
+## Verifying a build
 
-```bash
-# Configure
-cmake -B build-release -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_COMPILER=clang \
-  -DCMAKE_CXX_COMPILER=clang++
-
-# Build
-cmake --build build-release --parallel
-
-# Run
-./build-release/IDHMFIS
-```
-
----
-
-## Running Tests
+**Art-Net input**
 
 ```powershell
-# Build with tests
-cmake -B build-test -G Ninja `
-  -DCMAKE_BUILD_TYPE=Release
-
-cmake --build build-test --parallel
-
-# Run performance benchmark (outputs PERF_REPORT.md)
-.\build-test\bench_harness.exe --output PERF_REPORT.md
-
-# Run 4-hour soak test (accelerated, ~24 real minutes)
-.\build-test\soak_test.exe --duration-minutes 24 --output SOAK_REPORT.md
+.\build\bin\artnet_test_sender.exe --ip 127.0.0.1 --universe 0
 ```
 
----
+The DMX monitor should show channel activity, and the preview should follow the animated values.
 
-## Build Options
+**DAC output**
 
-| CMake Option | Default | Description |
-|-------------|---------|-------------|
-| `ENABLE_CLANG_TIDY` | OFF | Run clang-tidy during build |
-| `IDHMFIS_WITH_NDI` | AUTO | NDI support (AUTO=detect, ON=require, OFF=disable) |
-| `IDHMFIS_WITH_ASIO` | OFF | ASIO audio input support |
-| `IDHMFIS_BUILD_TOOLS` | ON | Build artnet_test_sender.exe and bench tools |
-| `CMAKE_BUILD_TYPE` | Debug | Debug / Release / RelWithDebInfo |
+1. Connect a Helios (USB), Ether Dream (LAN) or LaserDock (USB).
+2. Start IDHMFIS and patch the device under *Outputs*.
+3. The connection indicator turns green once the device is streaming.
 
----
+If you don't have hardware, turn on the emulated Helios DAC under *Settings → DAC*. It runs the complete output pipeline, including the optimizer, safety and output threads, without a device attached.
 
-## Third-Party Dependencies (fetched automatically by CMake)
+**NDI output**
 
-All of the following are downloaded by CMake FetchContent — no manual steps required:
-
-| Library | Version | License | Purpose |
-|---------|---------|---------|---------|
-| Dear ImGui (docking) | git HEAD docking branch | MIT | UI framework |
-| nlohmann/json | 3.11.3 | MIT | JSON serialization |
-| RtMidi | 6.0.0 | MIT | MIDI input |
-| readerwriterqueue | HEAD | BSD | Lock-free SPSC queue |
-| concurrentqueue | HEAD | BSD | Lock-free MPSC queue |
-| KissFFT | 2.0.0 | BSD | Audio FFT |
-| Vulkan Memory Allocator | 3.1.0 | MIT | GPU memory management |
-
-Vulkan headers are sourced from vcpkg (`vulkan` package).
-NDI SDK is an external install (not downloaded by CMake).
-
----
-
-## NDI Not Installed?
-
-NDI is optional. If the NDI SDK is not found at configure time, CMake emits:
-```
--- NDI SDK not found — building without NDI output. Install from https://ndi.video/
-```
-
-The app builds and runs without NDI. DAC output, ArtNet, MIDI, OSC, and all other
-functionality work normally. The NDI status indicator in the UI shows "NDI Unavailable".
-Install the NDI SDK and rebuild with `-DIDHMFIS_WITH_NDI=ON` to enable NDI streaming.
-
----
-
-## Clean Build from Scratch (checklist)
-
-1. `git clone` the repo
-2. Install prerequisites (VS2022, CMake, vcpkg, Vulkan SDK)
-3. `cmake -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake`
-4. `cmake --build build --parallel`
-5. `.\build\IDHMFIS.exe` — should start in < 1.5 seconds
-
-No other steps. If step 3 or 4 fail on a clean clone, that is a bug.
-
----
-
-## Verifying ArtNet Input
-
-```powershell
-# From the build directory, run the test sender:
-.\artnet_test_sender.exe --ip 127.0.0.1 --universe 0
-```
-
-The test sender sends animated DMX values. IDHMFIS's DMX activity monitor should
-show channel activity, and the laser preview should respond within 8 ms.
-
----
-
-## Verifying DAC Output
-
-1. Connect a supported DAC (Helios USB, EtherDream on LAN, or LaserDock USB)
-2. Start IDHMFIS and press Play
-3. The DAC status indicator in the Transport Bar should turn green within 2 seconds
-4. The physical laser output follows the active cue
-
-For testing without hardware, enable the emulated Helios DAC in Settings → DAC →
-Emulated DAC. This exercises the full output pipeline without a physical device.
-
----
-
-## Verifying NDI Output (optional)
-
-NDI output is disabled by default if the NDI SDK was not present at build time.
-
-1. Install NDI Tools (free) from https://ndi.video/tools/
-2. Build with NDI SDK installed (see prerequisites above)
-3. Launch NDI Studio Monitor
-4. Start IDHMFIS and press Play
-5. "IDHMFIS" should appear in NDI Studio Monitor's source list within 2 seconds
-6. The feed should show beam/haze simulation at the configured fps
+1. Install NDI Tools from <https://ndi.video/tools/>.
+2. Open NDI Studio Monitor. An `IDHMFIS` source should appear within a couple of seconds of pressing Play.

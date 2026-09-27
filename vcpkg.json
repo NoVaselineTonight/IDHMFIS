@@ -3,7 +3,7 @@
   "name": "idhmfis",
   "version": "0.1.0",
   "description": "IDHMFIS — Professional Laser Show Programming Application",
-  "homepage": "https://github.com/IDHMFIS/IDHMFIS",
+  "homepage": "https://github.com/NoVaselineTonight/IDHMFIS",
   "builtin-baseline": "a42af01b72c28a8e1d7b48107b33e4f286a55ef9",
   "dependencies": [
     {

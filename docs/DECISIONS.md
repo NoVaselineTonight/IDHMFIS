@@ -1,16 +1,16 @@
 # IDHMFIS Architecture Decision Record
 
-This document records every meaningful choice made during the build of IDHMFIS.
+This document records the significant architectural choices in IDHMFIS and the reasoning behind each one. Decisions are numbered in the order they were made. A decision is revisited only with a new record that explains why.
 
 ---
 
-## D-001 — NDI as Primary Output
+## D-001 — Hardware DAC Output Is the Primary Path; NDI Is a Parallel Consumer
 
-**Decision:** The render pipeline is NDI-first. The NDI stream is the primary deliverable from the renderer; the laser DAC path is a secondary consumer of the same frame buffer.
+**Decision:** The DAC output path is primary. The engine produces one optimised frame per stream, and that frame goes to the DAC output threads first. The GPU beam rasterizer and NDI sender read the same frame from the render bus as independent consumers.
 
-**Rationale:** This is the project's core differentiator. Every other laser show software outputs to a projector only, requiring a physical camera and fog to integrate with video workflows. IDHMFIS makes the clean render available over the network as a standard NDI source.
+**Rationale:** A laser controller has one job it cannot fail at: keeping the galvos fed with safe, correctly timed points. Video output is valuable, and a clean network feed of the beam render is something most laser software doesn't offer, but it must never be able to delay or starve the DAC.
 
-**Implication:** The GPU render path and NDI sender are on the critical path. DAC output can be temporarily unavailable without degrading the NDI stream.
+**Implication:** Disabling NDI, or losing the GPU, has no effect on laser output timing. The rasterizer can drop frames, but the DAC path cannot.
 
 ---
 
@@ -66,7 +66,7 @@ This document records every meaningful choice made during the build of IDHMFIS.
 
 **Rationale:** 
 - DAC point rates are 8k–60k pps. At 60k pps, a 1 ms tick delivers 60 points, which is the minimum meaningful quantum for trajectory smoothness.
-- DMX update rate is typically 40 Hz (25 ms), but we want to respond within 2 ms of a packet arriving to stay within the 8 ms p99 spec.
+- DMX update rate is typically 40 Hz (25 ms), but we want to respond within 2 ms of a packet arriving to stay within the 8 ms p99 latency target.
 - At 1000 Hz, each tick does: process input, evaluate cues, call generator, push to render bus. Each of these is O(n) in point count and sub-millisecond in practice.
 
 ---
@@ -77,7 +77,7 @@ This document records every meaningful choice made during the build of IDHMFIS.
 
 **Rationale:** JSON is human-readable, diffable in git, and editable in a text editor without special tools. The schema_version field enables forward/backward migration. The `.idhmfis` extension distinguishes from plain JSON and enables OS file association.
 
-**Alternative considered:** CBOR or MessagePack (smaller, faster). Rejected: The "human-diffable" requirement in the spec explicitly favors JSON. File sizes for typical shows (200 cues, parameterized generators) are < 500 KB, making binary formats unnecessary.
+**Alternative considered:** CBOR or MessagePack (smaller, faster). Rejected: human-diffable show files are a core requirement, because they make shows reviewable and mergeable in version control. File sizes for typical shows (200 cues, parameterized generators) are < 500 KB, making binary formats unnecessary.
 
 ---
 
@@ -99,9 +99,9 @@ This document records every meaningful choice made during the build of IDHMFIS.
 
 ## D-011 — Audio Input: WASAPI Loopback Primary
 
-**Decision:** WASAPI loopback capture is the primary audio input method on Windows. ASIO is supported as secondary. NDI audio passthrough is supported from the timeline.
+**Decision:** WASAPI loopback capture is the primary audio input method on Windows. The analyser's device abstraction also accepts ASIO endpoints and audio files.
 
-**Rationale:** WASAPI loopback requires no audio hardware and captures whatever is playing on the system, which is the typical laser show use case (DJ/VJ audio). ASIO requires specific hardware drivers and is more complex to integrate but provides lower latency for live audio-reactive work.
+**Rationale:** WASAPI loopback requires no audio hardware and captures whatever is playing on the system, which is the typical laser show use case (DJ/VJ audio). ASIO requires specific hardware drivers and is more complex to integrate but offers lower latency for live audio-reactive work, so the input layer is designed to accommodate it.
 
 ---
 
@@ -109,7 +109,7 @@ This document records every meaningful choice made during the build of IDHMFIS.
 
 **Decision:** Full Art-Net 4 ArtPoll/ArtPollReply is implemented so IDHMFIS appears automatically in grandMA3, Hog 4, Avolites, Chamsys, and ETC EOS network views.
 
-**Rationale:** The spec explicitly lists these consoles. If IDHMFIS doesn't show up in the console's "Devices" or "Network" view, operators can't patch it, and adoption dies. ArtPollReply must include correct IP, port, universe capability, and name strings.
+**Rationale:** These are the consoles laser operators are most likely to be patched into. If IDHMFIS doesn't show up in the console's "Devices" or "Network" view, operators can't patch it, and adoption dies. ArtPollReply must include correct IP, port, universe capability, and name strings.
 
 ---
 
@@ -170,10 +170,6 @@ This document records every meaningful choice made during the build of IDHMFIS.
 
 ---
 
-*Decisions are numbered in the order they were made. All decisions are final unless revisited with explicit reasoning.*
-
----
-
 ## D-019 — cuelist and fx libraries as source files (not separate CMake static libs)
 
 **Decision:** `src/cuelist/` and `src/fx/` contribute their sources to the IDHMFIS executable via the PARENT_SCOPE IDHMFIS_SOURCES accumulation pattern — the same pattern used by core, render, generators, input, dac, ui, audio, and project modules.
@@ -194,7 +190,7 @@ This document records every meaningful choice made during the build of IDHMFIS.
 
 **Decision:** `io.IniFilename = nullptr` — imgui.ini is not written or read.
 
-**Rationale:** DockBuilder runs once (when `LayoutContext.dockspace_initialised == false`) and sets the correct layout. A stale imgui.ini from any prior session overrides DockBuilder and recreates the broken layout that was reported in the original UI bug. Since LayoutContext persists as a member of Application::Impl, the correct layout is always reproducible from the DockBuilder code.
+**Rationale:** DockBuilder runs once (when `LayoutContext.dockspace_initialised == false`) and sets the correct layout. A stale imgui.ini from any prior session overrides DockBuilder and can restore a broken or outdated layout. Since LayoutContext persists as a member of Application::Impl, the correct layout is always reproducible from the DockBuilder code.
 
 ---
 
@@ -202,13 +198,13 @@ This document records every meaningful choice made during the build of IDHMFIS.
 
 **Decision:** `ImGuiConfigFlags_ViewportsEnable` is NOT set.
 
-**Rationale:** Multi-viewport mode requires per-viewport D3D12 swap chains. The current d3d12_renderer.cpp creates a single swap chain for the main window. Enabling ViewportsEnable without per-viewport swap chains causes ImGui to create OS windows that have no D3D12 context — these render as blank windows (the "empty useless window" reported by the user). Implementing per-viewport swap chains is deferred until after the core show features are complete.
+**Rationale:** Multi-viewport mode requires per-viewport D3D12 swap chains. The current d3d12_renderer.cpp creates a single swap chain for the main window. Enabling ViewportsEnable without per-viewport swap chains causes ImGui to create OS windows that have no D3D12 context — these render as blank windows. Implementing per-viewport swap chains is deferred until after the core show features are complete.
 
 ---
 
-## D-023 — BPM is User-Set Only (§B6)
+## D-023 — BPM Is User-Set Only
 
 **Decision:** BPM is never automatically locked to audio beat detection or any heuristic. The engine exposes a SetBpm command; only explicit user interaction (DragFloat in Transport panel) or external timecode (LTC/MTC) changes BPM. Audio beat detection may run as a read-only analysis visible in the UI (e.g., a "detected: 128.0 BPM" hint label) but must not write to the engine BPM without a user action.
 
-**Rationale:** §B6 explicit requirement. Auto-BPM lock during a live show causes abrupt cue timing shifts that could be dangerous with high-power lasers.
+**Rationale:** An auto-BPM lock during a live show causes abrupt cue timing shifts that could be dangerous with high-power lasers.
 
